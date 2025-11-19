@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emergency E‑Guidance — SVG Schematic (Draft B)</title>
+<style>
+  :root{
+    --bg:#0f172a;           /* slate-900 */
+    --panel:#111827;        /* gray-900 */
+    --muted:#94a3b8;        /* slate-400 */
+    --line:#475569;         /* slate-600 */
+    --accent:#22d3ee;       /* cyan-400 */
+    --accent-2:#14b8a6;     /* teal-500 */
+    --ok:#22c55e;           /* green-500 */
+    --bad:#ef4444;          /* red-500 */
+    --warn:#f59e0b;         /* amber-500 */
+    --off:#94a3b8;          /* slate-400 */
+  }
+  html,body{height:100%;}
+  body{
+    margin:0;background:var(--bg);color:#e5e7eb;
+    font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, "Helvetica Neue", Arial, "Apple Color Emoji","Segoe UI Emoji";
+    display:grid;grid-template-rows:auto 1fr;
+  }
+  header{padding:14px 18px;border-bottom:1px solid #1f2937;display:flex;align-items:center;gap:14px;}
+  header h1{font-size:20px;margin:0;font-weight:600;}
+  header .sub{color:var(--muted);font-size:14px}
+  main{display:grid;grid-template-columns:1fr 320px; gap:16px; padding:16px;}
+  .panel{background:var(--panel);border:1px solid #1f2937;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:12px}
+  #stage{background:#0b1220;border-radius:12px;border:1px solid #1f2937;overflow:hidden;position:relative}
+  #svg{display:block;width:100%;height:calc(100vh - 160px)}
+  .legend small{color:var(--muted)}
+  .btn{appearance:none;cursor:pointer;border-radius:8px;border:1px solid #263043;background:#111827;color:#e5e7eb;padding:8px 10px;font-weight:600}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.primary{background:var(--accent-2);border-color:#0f766e}
+  .btn.warn{background:var(--warn);border-color:#b45309}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+  .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid #1f2937;background:#0b1220;border-radius:999px;padding:4px 8px;color:#cbd5e1}
+  .muted{color:var(--muted)}
+
+  /* SVG styling */
+  .road{stroke:var(--line);stroke-width:40;fill:none;opacity:.55}
+  .road-inner{stroke:#0b1220;stroke-width:24;fill:none;opacity:1}
+  .gate{fill:#0b1220;stroke:var(--accent);stroke-width:2;opacity:.9}
+  .gate-label{fill:#cbd5e1;font-size:12px;text-anchor:middle}
+  .zone{fill:#0ea5e9;stroke:#0ea5e9;opacity:.18;stroke-width:2;cursor:pointer}
+  .zone-label{fill:#e5e7eb;font-weight:600;font-size:18px;text-anchor:middle;pointer-events:none}
+  .zone.active{opacity:.28;filter:url(#glow)}
+  .zone:hover{opacity:.24}
+  .tl{cursor:default}
+  .tl .tl-ring{fill:#0b1220;stroke:#0b1220;stroke-width:2}
+  .tl .tl-dot{fill:var(--off)}
+  .tl .tl-id{fill:#cbd5e1;font-size:11px;text-anchor:middle;dominant-baseline:middle;pointer-events:none}
+  .tl.state-green  .tl-dot{fill:var(--ok)}
+  .tl.state-red    .tl-dot{fill:var(--bad)}
+  .tl.state-fault  .tl-dot{fill:var(--warn)}
+  .tl.state-offline .tl-dot{fill:var(--off)}
+  .tl.entry-point .tl-ring{stroke:var(--accent);stroke-width:3;opacity:1}
+  .tl.entry-point .tl-dot{fill:var(--accent-2)}
+  .pulse{animation: pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{0%{opacity:.75}50%{opacity:1}100%{opacity:.75}}
+  .route{stroke:var(--accent);stroke-width:8;fill:none;stroke-linecap:round;stroke-linejoin:round;opacity:.95;filter:url(#glow)}
+  .route.active{stroke-dasharray:12 8; animation: dash 1.25s linear infinite}
+  @keyframes dash{to{stroke-dashoffset:-200}}
+  .ctl{position:absolute;right:10px;top:10px;background:#0b1220;border:1px solid #1f2937;border-radius:10px;padding:8px;display:flex;gap:8px;align-items:center}
+  .kbd{font:12px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,Liberation Mono,monospace;background:#0b1220;border:1px solid #1f2937;border-bottom-width:2px;padding:0 6px;border-radius:6px}
+</style>
+</head>
+<body>
+  <header>
+    <h1>Emergency E‑Guidance — SVG Schematic</h1>
+    <div class="sub">Route-based system. Click a zone → choose wind direction → Activate route policy. TL1 is the entry point.</div>
+  </header>
+  <main>
+    <section id="stage" class="panel">
+      <!-- top-left inline hints -->
+      <div class="ctl">
+        <span class="pill"><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="var(--ok)"/></svg> Green</span>
+        <span class="pill"><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="var(--bad)"/></svg> Red</span>
+        <span class="pill"><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="var(--warn)"/></svg> Fault</span>
+        <span class="pill"><svg width="12" height="12"><circle cx="6" cy="6" r="5" fill="var(--off)"/></svg> Offline</span>
+      </div>
+      <!-- SVG SCHEMATIC -->
+      <svg id="svg" viewBox="0 0 1200 800" tabindex="0" aria-label="Facility schematic">
+        <defs>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3.5" result="coloredBlur"/>
+            <feMerge>
+              <feMergeNode in="coloredBlur"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"></path>
+          </marker>
+        </defs>
+
+        <!-- Road (ellipse band) -->
+        <ellipse id="road1" class="road" cx="600" cy="400" rx="520" ry="320"></ellipse>
+        <ellipse id="road2" class="road-inner" cx="600" cy="400" rx="520" ry="320"></ellipse>
+
+        <!-- Active route path -->
+        <path id="route" class="route" marker-end="url(#arrow)" d=""></path>
+
+        <!-- Remove Gates section - wind directions are not gates -->
+        <!-- <g id="gates"></g> -->
+
+        <!-- Zones -->
+        <g id="zones"></g>
+
+        <!-- Traffic lights -->
+        <g id="tls"></g>
+
+        <!-- (optional) User location marker placeholder -->
+        <g id="user" visibility="hidden">
+          <circle cx="0" cy="0" r="8" fill="#60a5fa" stroke="#1e3a8a" stroke-width="2"></circle>
+          <text x="12" y="4" fill="#bfdbfe" font-size="12">You</text>
+        </g>
+      </svg>
+    </section>
+
+    <aside class="panel">
+      <div>
+        <div class="muted" style="margin-bottom:6px">Wind Directions</div>
+        <div id="windGrid" class="grid4"></div>
+        <div id="policyStatus" class="muted" style="margin-top:6px;font-size:12px">Loading route policies...</div>
+        <div id="connectionStatus" class="muted" style="margin-top:4px;font-size:11px">Checking backend connection...</div>
+      </div>
+
+      <div>
+        <div class="muted" style="margin-bottom:6px">Selection</div>
+        <div class="pill" style="justify-content:space-between">
+          <span>Zone: <b id="selZone">—</b></span>
+          <span>Wind: <b id="selWind">—</b></span>
+        </div>
+        <div id="routeSequence" class="muted" style="margin-top:6px;font-size:12px;display:none"></div>
+      </div>
+
+      <div style="display:flex; gap:8px">
+        <button id="btnActivate" class="btn primary" disabled>Activate</button>
+        <button id="btnClear" class="btn">Clear</button>
+        <button id="btnRefresh" class="btn">🔄 Refresh</button>
+      </div>
+
+      <div style="display:flex; gap:8px;flex-wrap:wrap">
+        <button id="btnEdit" class="btn">🛠 Edit layout</button>
+        <button id="btnExport" class="btn">⬇️ Export layout JSON</button>
+        <button id="btnSim" class="btn">🎛 Simulate TL updates</button>
+      </div>
+
+      <div class="legend">
+        <div class="muted">How to use</div>
+        <ul style="margin:6px 0 0 16px;color:#cbd5e1">
+          <li>Click a zone rectangle to select it.</li>
+          <li>Pick a wind direction (N, NE, …, NW) then press <b>Activate</b>.</li>
+          <li>Active route shows: Zone → TL1 (entry) → policy sequence.</li>
+          <li><span style="color:var(--accent-2);font-weight:600;">TL1</span> is the central entry point (highlighted in teal).</li>
+          <li>Click <b>🛠 Edit layout</b>, then drag TL markers, zone labels to reposition. Press again to exit edit mode.</li>
+          <li>Use <span class="kbd">Ctrl</span>+<span class="kbd">S</span> to export JSON anytime.</li>
+        </ul>
+        <small>Routes follow actual policies from your backend database. Wind directions select route policies, not exit gates.</small>
+        <div style="margin-top:8px;padding:8px;background:#0b1220;border-radius:6px;font-size:11px;color:var(--muted)">
+          <strong>System Architecture:</strong><br>
+          • TL1 is the central entry point<br>
+          • Routes start at TL1 and follow policy sequences<br>
+          • Wind directions determine which route policy to apply<br>
+          • No more perimeter gates - routes follow actual TL connections
+        </div>
+      </div>
+    </aside>
+  </main>
+
+<script>
+(function(){
+  // ---- Geometry constants ----
+  const W=1200,H=800, CX=600, CY=400, RX=520, RY=320;
+  const TL_COUNT = 14;
+  const TL_IDS = Array.from({length:TL_COUNT}, (_,i)=>`TL${i+1}`);
+  // Remove GATES and GATE_ANGLE - wind directions are not gates
+  
+  // Backend configuration
+  const BACKEND_URL = 'http://localhost:8002';
+  
+  // Test backend connection
+  async function testBackendConnection() {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/zones/`);
+      if (response.ok) {
+        console.log('Backend connection successful');
+        return true;
+      } else {
+        console.warn('Backend responded but with error:', response.status);
+        return false;
+      }
+    } catch (error) {
+      console.error('Backend connection failed:', error);
+      return false;
+    }
+  }
+  
+  // Zones layout (rough placeholders — adjust later)
+  const ZONES = {
+    A:{c:[340,210], sz:[180,110]},
+    B:{c:[600,180], sz:[230,100]},
+    C:{c:[860,210], sz:[180,110]},
+    D:{c:[340,360], sz:[180,110]},
+    E:{c:[480,330], sz:[160,110]},
+    F:{c:[600,380], sz:[220,140]},
+    G:{c:[760,350], sz:[160,110]},
+    H:{c:[380,540], sz:[200,120]},
+    K:{c:[820,540], sz:[200,120]},
+  };
+
+  // --- State ---
+  let selectedZone = null;
+  let selectedWind = null;
+  let editMode = false;
+  let simTimer = null;
+  let routePolicies = {}; // Store actual route policies from backend
+
+  // --- Helpers ---
+  const svg = document.getElementById('svg');
+  const zonesLayer = document.getElementById('zones');
+  const tlsLayer = document.getElementById('tls');
+  const routePath = document.getElementById('route');
+  // Remove gatesLayer reference
+  const selZoneEl = document.getElementById('selZone');
+  const selWindEl = document.getElementById('selWind');
+  const btnActivate = document.getElementById('btnActivate');
+
+  const polar = (deg, rx=RX, ry=RY) => {
+    const rad = (deg*Math.PI)/180;
+    return [CX + rx*Math.cos(rad), CY + ry*Math.sin(rad)];
+  };
+
+  function setSelected(zoneId){
+    selectedZone = zoneId;
+    selZoneEl.textContent = zoneId || '—';
+    refreshZoneStyles();
+    updateBtnState();
+  }
+
+  function setWind(w){
+    selectedWind = w;
+    selWindEl.textContent = w || '—';
+    updateBtnState();
+  }
+
+  function updateBtnState(){
+    btnActivate.disabled = !(selectedZone && selectedWind);
+  }
+
+  function refreshZoneStyles(){
+    zonesLayer.querySelectorAll('.zone').forEach(z => {
+      const isActive = (z.dataset.zone === selectedZone);
+      z.classList.toggle('active', isActive);
+    });
+  }
+
+  function makeDraggable(el, onMove){
+    let dragging=false, ox=0, oy=0;
+    const svgPt = svg.createSVGPoint();
+    function cursorPoint(evt) {
+      svgPt.x = evt.clientX; svgPt.y = evt.clientY;
+      return svgPt.matrixTransform(svg.getScreenCTM().inverse());
+    }
+    el.addEventListener('pointerdown', (e)=>{
+      if(!editMode) return;
+      dragging=true; el.setPointerCapture(e.pointerId);
+      const p=cursorPoint(e); ox=p.x; oy=p.y;
+      e.preventDefault();
+    });
+    el.addEventListener('pointermove', (e)=>{
+      if(!dragging || !editMode) return;
+      const p=cursorPoint(e);
+      const dx=p.x-ox, dy=p.y-oy;
+      onMove(dx,dy);
+      ox=p.x; oy=p.y;
+    });
+    el.addEventListener('pointerup', ()=> dragging=false);
+    el.addEventListener('pointercancel', ()=> dragging=false);
+  }
+
+  // ---- Build gates ----
+  const Gate = {};
+  // Remove GATES and GATE_ANGLE - wind directions are not gates
+  // GATES.forEach(name => {
+  //   const ang = GATE_ANGLE[name];
+  //   const [x,y] = polar(ang, RX+6, RY+6);
+  //   const tip = polar(ang, RX+26, RY+26);
+  //   const baseL = polar(ang-7, RX+6, RY+6);
+  //   const baseR = polar(ang+7, RX+6, RY+6);
+
+  //   const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+  //   g.classList.add('gate'); g.dataset.gate = name;
+  //   const tri = document.createElementNS("http://www.w3.org/2000/svg","path");
+  //   tri.setAttribute('d', `M ${baseL[0]} ${baseL[1]} L ${tip[0]} ${tip[1]} L ${baseR[0]} ${baseR[1]} Z`);
+  //   const label = document.createElementNS("http://www.w3.org/2000/svg","text");
+  //   label.setAttribute('x', x); label.setAttribute('y', y - 10);
+  //   label.setAttribute('class', 'gate-label'); label.textContent = name;
+  //   g.appendChild(tri); g.appendChild(label);
+  //   gatesLayer.appendChild(g);
+  //   Gate[name] = {name, tri, label, ang, tip, x, y};
+  //   makeDraggable(g, (dx,dy)=>{
+  //     // Shift the triangle by dx,dy
+  //     const d = tri.getAttribute('d').replace(/-?\d+(\.\d+)?/g, (num, i, str) => ''+ (parseFloat(num) + (i%2? dy: dx)));
+  //     tri.setAttribute('d', d);
+  //     label.setAttribute('x', parseFloat(label.getAttribute('x'))+dx);
+  //     label.setAttribute('y', parseFloat(label.getAttribute('y'))+dy);
+  //     // Update tip for routing approximation
+  //     Gate[name].tip = [Gate[name].tip[0]+dx, Gate[name].tip[1]+dy];
+  //   });
+  // });
+
+  // ---- Build zones ----
+  const Zone = {};
+  Object.entries(ZONES).forEach(([id, obj])=>{
+    const [cx,cy] = obj.c; const [w,h]=obj.sz;
+    const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.dataset.zone = id;
+    const r = document.createElementNS("http://www.w3.org/2000/svg","rect");
+    r.setAttribute('x', cx-w/2); r.setAttribute('y', cy-h/2);
+    r.setAttribute('width', w); r.setAttribute('height', h);
+    r.setAttribute('rx', 12); r.setAttribute('ry', 12);
+    r.setAttribute('class','zone');
+    const label = document.createElementNS("http://www.w3.org/2000/svg","text");
+    label.setAttribute('x', cx); label.setAttribute('y', cy+6);
+    label.setAttribute('class','zone-label'); label.textContent = id;
+    g.appendChild(r); g.appendChild(label);
+    zonesLayer.appendChild(g);
+    Zone[id] = {id, g, r, label, c:[cx,cy], sz:[w,h]};
+
+    g.addEventListener('click', ()=> setSelected(id));
+
+    // Dragging the label moves the zone (in edit mode)
+    makeDraggable(g, (dx,dy)=>{
+      if(!editMode) return;
+      Zone[id].c = [Zone[id].c[0]+dx, Zone[id].c[1]+dy];
+      const [cx,cy] = Zone[id].c, [w,h]=Zone[id].sz;
+      r.setAttribute('x', cx-w/2); r.setAttribute('y', cy-h/2);
+      label.setAttribute('x', cx); label.setAttribute('y', cy+6);
+    });
+  });
+
+  // ---- Build TL nodes around the road (initial angles evenly spaced) ----
+  const TL = {};
+  const angles = Array.from({length:TL_COUNT}, (_,i)=> -90 + i*(360/TL_COUNT));
+  TL_IDS.forEach((id, idx)=>{
+    const [x,y] = polar(angles[idx]);
+    const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.dataset.tlId = id;
+    g.setAttribute('transform', `translate(${x},${y})`);
+    g.setAttribute('class', 'tl state-offline');
+    const ring = document.createElementNS("http://www.w3.org/2000/svg","circle");
+    ring.setAttribute('class','tl-ring'); ring.setAttribute('r', 12);
+    const dot = document.createElementNS("http://www.w3.org/2000/svg","circle");
+    dot.setAttribute('class','tl-dot'); dot.setAttribute('r', 8);
+    const text = document.createElementNS("http://www.w3.org/2000/svg","text");
+    text.setAttribute('class','tl-id'); text.setAttribute('y', 26); text.textContent = id;
+    g.appendChild(ring); g.appendChild(dot); g.appendChild(text);
+    tlsLayer.appendChild(g);
+    TL[id] = {id, idx, g, ring, dot, text, angle: angles[idx]};
+
+    // Make TL1 more prominent as entry point
+    if (id === 'TL1') {
+      ring.setAttribute('r', 16); // Larger ring
+      dot.setAttribute('r', 10);  // Larger dot
+      text.setAttribute('font-size', '13'); // Larger text
+      g.classList.add('entry-point');
+    }
+
+    // Drag in edit mode
+    makeDraggable(g, (dx,dy)=>{
+      if(!editMode) return;
+      const tr = g.getAttribute('transform');
+      const m = /translate\(([^,]+),([^)]+)\)/.exec(tr);
+      let nx = parseFloat(m[1]) + dx, ny = parseFloat(m[2]) + dy;
+      g.setAttribute('transform', `translate(${nx},${ny})`);
+      TL[id].pos = [nx, ny];
+    });
+  });
+
+  function tlSetState(id, state){
+    const tl = TL[id]; if(!tl) return;
+    tl.g.classList.remove('state-green','state-red','state-fault','state-offline');
+    tl.g.classList.add(`state-${state}`);
+    if(state==='fault') tl.g.classList.add('pulse'); else tl.g.classList.remove('pulse');
+  }
+
+  // Initial demo: set all to offline, then a few to green/red
+  ['TL1','TL4','TL7','TL10','TL13'].forEach(id => tlSetState(id, 'green'));
+  ['TL2','TL5','TL8','TL11','TL14'].forEach(id => tlSetState(id, 'red'));
+
+  // Set TL1 as entry point (always green)
+  tlSetState('TL1', 'green');
+
+  // ---- Routing ----
+
+  // Compute closest TL node to a point
+  function nearestTL([x,y]){
+    let bestId=null, bestD=1e12;
+    for (const id of TL_IDS){
+      // current position (transform) wins over angle default
+      const tr = TL[id].g.getAttribute('transform');
+      const m = /translate\(([^,]+),([^)]+)\)/.exec(tr);
+      const px = parseFloat(m[1]), py = parseFloat(m[2]);
+      const dx = px-x, dy = py-y;
+      const d = dx*dx + dy*dy;
+      if(d<bestD){bestD=d; bestId=id;}
+    }
+    return bestId;
+  }
+
+  function indexOfTL(id){ return TL[id]?.idx ?? TL_IDS.indexOf(id); }
+
+  // Path along ring from start idx to end idx -> list of TL indices inclusive
+  function ringPath(iStart, iEnd){
+    const n=TL_COUNT;
+    // clockwise
+    let i=iStart, cw=[iStart];
+    while(i!==iEnd){ i=(i+1)%n; cw.push(i); }
+    // counter-clockwise
+    i=iStart; let ccw=[iStart];
+    while(i!==iEnd){ i=(i-1+n)%n; ccw.push(i); }
+    // choose the shorter
+    return (cw.length <= ccw.length) ? cw : ccw;
+  }
+
+  function pathToD(points){
+    if(points.length===0) return '';
+    const p0 = points[0];
+    let d = `M ${p0[0]} ${p0[1]}`;
+    for(let i=1;i<points.length;i++){
+      d += ` L ${points[i][0]} ${points[i][1]}`;
+    }
+    return d;
+  }
+
+  function tlXY(id){
+    const tr = TL[id].g.getAttribute('transform');
+    const m = /translate\(([^,]+),([^)]+)\)/.exec(tr);
+    return [parseFloat(m[1]), parseFloat(m[2])];
+  }
+
+  // NEW: Fetch route policies from backend
+  async function fetchRoutePolicies() {
+    try {
+      // Test backend connection first
+      const isConnected = await testBackendConnection();
+      if (!isConnected) {
+        updatePolicyStatus('Backend not accessible - check if server is running on port 8002');
+        updateConnectionStatus('Backend not accessible', false);
+        return;
+      }
+      updateConnectionStatus('Backend accessible', true);
+      
+      // Fetch zones and routes from backend - use correct backend URL
+      const backendUrl = BACKEND_URL;
+      const zonesResponse = await fetch(`${backendUrl}/api/zones/`);
+      const routesResponse = await fetch(`${backendUrl}/api/routes/`);
+      
+      if (!zonesResponse.ok || !routesResponse.ok) {
+        console.warn('Failed to fetch zones/routes from backend');
+        updatePolicyStatus(`Backend error: ${zonesResponse.status} / ${routesResponse.status}`);
+        return;
+      }
+      
+      const zones = await zonesResponse.json();
+      const routes = await routesResponse.json();
+      
+      // Build route policies for each wind direction
+      const policies = {};
+      routes.forEach(route => {
+        const wind = route.wind_direction;
+        if (!policies[wind]) {
+          policies[wind] = [];
+        }
+        policies[wind].push({
+          routeId: route.id,
+          zoneId: route.zone_id,
+          zoneName: zones.find(z => z.id === route.zone_id)?.name || `Zone ${route.zone_id}`,
+          windDirection: wind
+        });
+      });
+      
+      routePolicies = policies;
+      console.log('Route policies loaded:', routePolicies);
+      updatePolicyStatus(`Policies loaded: ${Object.keys(policies).length} wind directions`);
+    } catch (error) {
+      console.error('Error fetching route policies:', error);
+      updatePolicyStatus(`Connection error: ${error.message}`);
+      updateConnectionStatus('Connection error', false);
+    }
+  }
+
+  // NEW: Compute route based on actual policy sequence
+  function computeRoute(zoneId, wind){
+    const z = Zone[zoneId]; 
+    if(!z) return '';
+    
+    // Find the route for this zone and wind direction
+    const routes = routePolicies[wind] || [];
+    const route = routes.find(r => r.zoneId === z.id);
+    
+    if (!route) {
+      console.warn(`No route found for Zone ${zoneId} with wind ${wind}`);
+      return '';
+    }
+    
+    // Fetch the actual policy sequence from backend
+    return fetchRoutePolicy(route.routeId, z.c, wind);
+  }
+
+  // NEW: Fetch actual route policy and compute path
+  async function fetchRoutePolicy(routeId, zoneCenter, wind) {
+    try {
+      const backendUrl = BACKEND_URL;
+      const response = await fetch(`${backendUrl}/api/routes/${routeId}/policy`);
+      if (!response.ok) {
+        console.warn(`Failed to fetch policy for route ${routeId}`);
+        return '';
+      }
+      
+      const policy = await response.json();
+      if (!policy || policy.length === 0) {
+        console.warn(`No policy found for route ${routeId}`);
+        return '';
+      }
+      
+      // Build path: zone center -> TL1 (entry) -> policy sequence
+      const pts = [];
+      pts.push(zoneCenter); // Start at zone center
+      
+      // Add TL1 as entry point (center of the system)
+      const tl1Pos = tlXY('TL1');
+      pts.push(tl1Pos);
+      
+      // Add each TL in the policy sequence
+      policy.forEach(item => {
+        const tlPos = tlXY(`TL${item.device_id}`);
+        if (tlPos) {
+          pts.push(tlPos);
+        }
+      });
+      
+      return {
+        d: pathToD(pts), 
+        policy: policy,
+        startTL: 'TL1',
+        zoneCenter: zoneCenter,
+        wind: wind
+      };
+    } catch (error) {
+      console.error('Error fetching route policy:', error);
+      return '';
+    }
+  }
+
+  function highlightRoute(zoneId, wind){
+    // Clear previous route
+    routePath.setAttribute('d', '');
+    routePath.classList.remove('active');
+    
+    // Clear previous sequence display
+    const routeSequenceEl = document.getElementById('routeSequence');
+    if (routeSequenceEl) {
+      routeSequenceEl.style.display = 'none';
+      routeSequenceEl.textContent = '';
+    }
+    
+    // Compute and display new route
+    computeRoute(zoneId, wind).then(route => {
+      if (route && route.d) {
+        routePath.setAttribute('d', route.d);
+        routePath.classList.add('active');
+        
+        // Show route sequence
+        if (route.policy && routeSequenceEl) {
+          const sequence = route.policy.map(item => 
+            `TL${item.device_id} ${item.direction === 'left' ? 'L' : item.direction === 'right' ? 'R' : 'S'}`
+          ).join(' → ');
+          routeSequenceEl.textContent = `Route: ${sequence}`;
+          routeSequenceEl.style.display = 'block';
+          routeSequenceEl.style.color = 'var(--accent)';
+        }
+        
+        // Highlight TLs in the policy sequence
+        TL_IDS.forEach(id => TL[id].g.classList.remove('pulse'));
+        if (route.policy) {
+          route.policy.forEach(item => {
+            const tl = TL[`TL${item.device_id}`];
+            if (tl) {
+              tl.g.classList.add('pulse');
+            }
+          });
+        }
+      }
+    });
+  }
+
+  function clearRoute(){
+    routePath.setAttribute('d','');
+    routePath.classList.remove('active');
+    zonesLayer.querySelectorAll('.zone').forEach(z => z.classList.remove('active'));
+    selectedZone = null; selectedWind = null;
+    selZoneEl.textContent = '—'; selWindEl.textContent = '—';
+    updateBtnState();
+    TL_IDS.forEach(id => TL[id].g.classList.remove('pulse'));
+    
+    // Clear route sequence display
+    const routeSequenceEl = document.getElementById('routeSequence');
+    if (routeSequenceEl) {
+      routeSequenceEl.style.display = 'none';
+      routeSequenceEl.textContent = '';
+    }
+  }
+
+  // ---- UI: wind grid ----
+  const windGrid = document.getElementById('windGrid');
+  function mkWindBtn(label){
+    const b = document.createElement('button'); b.className='btn'; b.textContent=label;
+    b.addEventListener('click', ()=> setWind(label));
+    return b;
+  }
+  // Remove GATES.forEach(w => windGrid.appendChild(mkWindBtn(w)));
+  ['N','NE','E','SE','S','SW','W','NW'].forEach(w => windGrid.appendChild(mkWindBtn(w)));
+
+  function updatePolicyStatus(message){
+    const policyStatusEl = document.getElementById('policyStatus');
+    if(policyStatusEl){
+      policyStatusEl.textContent = message;
+      if(message.includes('Policies loaded')){
+        policyStatusEl.style.color = 'var(--ok)';
+        // Update wind buttons to show available policies
+        updateWindButtons();
+      } else if(message.includes('Failed to load policies')){
+        policyStatusEl.style.color = 'var(--bad)';
+      } else {
+        policyStatusEl.style.color = 'var(--muted)';
+      }
+    }
+  }
+
+  function updateWindButtons() {
+    const windButtons = windGrid.querySelectorAll('button');
+    windButtons.forEach(btn => {
+      const wind = btn.textContent;
+      const hasPolicies = routePolicies[wind] && routePolicies[wind].length > 0;
+      btn.style.opacity = hasPolicies ? '1' : '0.4';
+      btn.title = hasPolicies ? `Has ${routePolicies[wind].length} route(s)` : 'No routes available';
+    });
+  }
+
+  function updateConnectionStatus(message, isConnected = false){
+    const connectionStatusEl = document.getElementById('connectionStatus');
+    if(connectionStatusEl){
+      connectionStatusEl.textContent = message;
+      connectionStatusEl.style.color = isConnected ? 'var(--ok)' : 'var(--bad)';
+    }
+  }
+
+  document.getElementById('btnActivate').addEventListener('click', ()=>{
+    highlightRoute(selectedZone, selectedWind);
+  });
+  document.getElementById('btnClear').addEventListener('click', clearRoute);
+  document.getElementById('btnRefresh').addEventListener('click', ()=>{
+    updateConnectionStatus('Refreshing...', false);
+    updatePolicyStatus('Refreshing policies...');
+    fetchRoutePolicies();
+  });
+
+  // ---- Edit mode ----
+  const btnEdit = document.getElementById('btnEdit');
+  btnEdit.addEventListener('click', ()=>{
+    editMode = !editMode;
+    btnEdit.classList.toggle('warn', editMode);
+    btnEdit.textContent = editMode ? '✅ Done editing' : '🛠 Edit layout';
+  });
+
+  // ---- Export layout JSON ----
+  function exportLayout(){
+    // Collect current positions
+    const zones = {};
+    Object.keys(Zone).forEach(id => {
+      const z = Zone[id];
+      zones[id] = { center: z.c, size: z.sz };
+    });
+    const tls = {};
+    TL_IDS.forEach(id => { tls[id] = tlXY(id); });
+    // Remove gates from export
+    // const gates = {};
+    // GATES.forEach(g => {
+    //   // store gate tip
+    //   gates[g] = Gate[g].tip;
+    // });
+    const layout = { zones, tls, meta:{cx:CX, cy:CY, rx:RX, ry:RY, updated:new Date().toISOString()} };
+    const blob = new Blob([JSON.stringify(layout,null,2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'eguidance_layout.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+  document.getElementById('btnExport').addEventListener('click', exportLayout);
+  document.addEventListener('keydown', (e)=>{
+    if((e.ctrlKey || e.metaKey) && e.key.toLowerCase()==='s'){ e.preventDefault(); exportLayout(); }
+    if(e.key.toLowerCase()==='e'){ editMode = !editMode; btnEdit.click(); } // shortcut
+  });
+
+  // ---- Simulation of TL updates ----
+  const states = ['green','red','fault','offline'];
+  function randomTLUpdate(){
+    const id = TL_IDS[Math.floor(Math.random()*TL_IDS.length)];
+    const st = states[Math.floor(Math.random()*states.length)];
+    tlSetState(id, st);
+  }
+  const btnSim = document.getElementById('btnSim');
+  btnSim.addEventListener('click', ()=>{
+    if(simTimer){ clearInterval(simTimer); simTimer=null; btnSim.textContent = '🎛 Simulate TL updates'; return; }
+    simTimer = setInterval(randomTLUpdate, 900);
+    btnSim.textContent = '⏹ Stop simulation';
+  });
+
+  // ---- Backend WebSocket (optional) ----
+  // Uncomment and point WS_URL to your FastAPI /ws endpoint to receive live updates.
+  // const WS_URL = (location.protocol==='https:'?'wss':'ws') + '://' + location.host + '/ws';
+  // try {
+  //   const ws = new WebSocket(WS_URL);
+  //   ws.onmessage = (ev)=>{
+  //     const msg = JSON.parse(ev.data);
+  //     if(msg.type==='tl_status'){ tlSetState(msg.payload.id, msg.payload.state); }
+  //     if(msg.type==='zone_activated'){ setSelected(msg.payload.zone); setWind(msg.payload.wind); highlightRoute(selectedZone, selectedWind); }
+  //     if(msg.type==='snapshot' && msg.payload?.tl){
+  //       Object.entries(msg.payload.tl).forEach(([id,obj])=> tlSetState(id, obj.state||'offline'));
+  //     }
+  //   };
+  // } catch(e){ console.warn('WebSocket unavailable', e); }
+
+  // Initialize
+  refreshZoneStyles();
+  setTimeout(()=>svg.focus(), 200);
+  function ensureSelectedOnClick(ev){
+    // If operator clicks empty space, clear selection (but keep edit mode)
+    if(ev.target === svg) clearRoute();
+  }
+  svg.addEventListener('click', ensureSelectedOnClick);
+  
+  // Initialize with debugging
+  console.log('E-Guidance Schematic initializing...');
+  console.log('Backend URL:', BACKEND_URL);
+  fetchRoutePolicies(); // Initialize route policies
+
+})();</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL1" }, "geometry": { "type": "Point", "coordinates": [49.71049695811061, 25.937277357907377] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL2" }, "geometry": { "type": "Point", "coordinates": [49.70797010597485, 25.93728140594844] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL3" }, "geometry": { "type": "Point", "coordinates": [49.71114314518954, 25.936121790664743] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL4" }, "geometry": { "type": "Point", "coordinates": [49.708276961270656, 25.93611302968192] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL5" }, "geometry": { "type": "Point", "coordinates": [49.707650193008305, 25.936165871070003] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL6" }, "geometry": { "type": "Point", "coordinates": [49.711064799157015, 25.935434850516657] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL7" }, "geometry": { "type": "Point", "coordinates": [49.709791676123615, 25.935182384327277] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL8" }, "geometry": { "type": "Point", "coordinates": [49.70831615917342, 25.935241097443168] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL9" }, "geometry": { "type": "Point", "coordinates": [49.709200, 25.936650] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL10" }, "geometry": { "type": "Point", "coordinates": [49.709950, 25.936500] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL11" }, "geometry": { "type": "Point", "coordinates": [49.708900, 25.936800] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL12" }, "geometry": { "type": "Point", "coordinates": [49.707900, 25.936800] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL13" }, "geometry": { "type": "Point", "coordinates": [49.711000, 25.936800] } },
+    { "type": "Feature", "properties": { "type": "traffic_light", "name": "TL14" }, "geometry": { "type": "Point", "coordinates": [49.711500, 25.936800] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 1, "name": "Zone A" }, "geometry": { "type": "Polygon", "coordinates": [[[49.70725,25.93745],[49.70720,25.93695],[49.70780,25.93695],[49.70780,25.93740],[49.70725,25.93745]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 1, "label": "Zone A" }, "geometry": { "type": "Point", "coordinates": [49.70750,25.93715] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 2, "name": "Zone B" }, "geometry": { "type": "Polygon", "coordinates": [[[49.70790,25.93735],[49.70790,25.93685],[49.70850,25.93685],[49.70850,25.93735],[49.70790,25.93735]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 2, "label": "Zone B" }, "geometry": { "type": "Point", "coordinates": [49.70820,25.93710] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 3, "name": "Zone C" }, "geometry": { "type": "Polygon", "coordinates": [[[49.70960,25.93725],[49.70960,25.93675],[49.71020,25.93675],[49.71020,25.93725],[49.70960,25.93725]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 3, "label": "Zone C" }, "geometry": { "type": "Point", "coordinates": [49.70990,25.93700] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 4, "name": "Zone D" }, "geometry": { "type": "Polygon", "coordinates": [[[49.71030,25.93710],[49.71030,25.93660],[49.71090,25.93660],[49.71090,25.93710],[49.71030,25.93710]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 4, "label": "Zone D" }, "geometry": { "type": "Point", "coordinates": [49.71060,25.93685] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 5, "name": "Zone E" }, "geometry": { "type": "Polygon", "coordinates": [[[49.70720,25.93660],[49.70720,25.93610],[49.70780,25.93610],[49.70780,25.93660],[49.70720,25.93660]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 5, "label": "Zone E" }, "geometry": { "type": "Point", "coordinates": [49.70750,25.93635] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 6, "name": "Zone F" }, "geometry": { "type": "Polygon", "coordinates": [[[49.70790,25.93655],[49.70790,25.93605],[49.70850,25.93605],[49.70850,25.93655],[49.70790,25.93655]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 6, "label": "Zone F" }, "geometry": { "type": "Point", "coordinates": [49.70820,25.93630] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 7, "name": "Zone G" }, "geometry": { "type": "Polygon", "coordinates": [[[49.70960,25.93645],[49.70960,25.93595],[49.71020,25.93595],[49.71020,25.93645],[49.70960,25.93645]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 7, "label": "Zone G" }, "geometry": { "type": "Point", "coordinates": [49.70990,25.93620] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 8, "name": "Zone H" }, "geometry": { "type": "Polygon", "coordinates": [[[49.71030,25.93630],[49.71030,25.93580],[49.71090,25.93580],[49.71090,25.93630],[49.71030,25.93630]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 8, "label": "Zone H" }, "geometry": { "type": "Point", "coordinates": [49.71060,25.93605] } },
+
+    { "type": "Feature", "properties": { "type": "zone", "zone_id": 9, "name": "Zone K" }, "geometry": { "type": "Polygon", "coordinates": [[[49.71090,25.93590],[49.71090,25.93540],[49.71000,25.93540],[49,71000,25.93590],[49.71090,25.93590]]] } },
+    { "type": "Feature", "properties": { "type": "zone_label", "zone_id": 9, "label": "Zone K" }, "geometry": { "type": "Point", "coordinates": [49.70930,25.93565] } }
+  ]
+}

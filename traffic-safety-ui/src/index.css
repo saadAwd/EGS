@@ -1,0 +1,247 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --neon-cyan: #00ffff;
+  --dark-bg: #000810;
+  --darker-bg: #000305;
+  --text-primary: #ffffff;
+  --gradient-start: #0a1930;
+  --gradient-end: #001324;
+  --accent-blue: #3b82f6;
+  --accent-purple: #8b5cf6;
+}
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-gradient-to-br from-[var(--gradient-start)] to-[var(--gradient-end)];
+    color: var(--text-primary);
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+  }
+}
+
+/* Animated Background Shape */
+.bg-shape {
+  position: absolute;
+  width: 500px;
+  height: 500px;
+  filter: blur(80px);
+  opacity: 0.15;
+  background: linear-gradient(45deg, var(--accent-blue), var(--accent-purple));
+  animation: morphShape 20s ease-in-out infinite;
+  z-index: 0;
+}
+
+@keyframes morphShape {
+  0% { border-radius: 60% 40% 30% 70%/60% 30% 70% 40%; }
+  50% { border-radius: 30% 60% 70% 40%/50% 60% 30% 60%; }
+  100% { border-radius: 60% 40% 30% 70%/60% 30% 70% 40%; }
+}
+
+/* Premium Button Styles */
+.btn-premium {
+  @apply relative px-6 py-3 rounded-xl font-medium text-white transition-all duration-300 
+         bg-gradient-to-r from-[var(--accent-blue)] to-[var(--accent-purple)]
+         hover:shadow-lg hover:shadow-blue-500/25 hover:-translate-y-0.5;
+}
+
+.btn-premium::before {
+  content: '';
+  @apply absolute inset-0.5 rounded-[11px] bg-[var(--darker-bg)] opacity-0
+         transition-opacity duration-300;
+}
+
+.btn-premium:hover::before {
+  @apply opacity-20;
+}
+
+/* Status Badge */
+.status-badge {
+  @apply fixed bottom-8 left-8 flex items-center justify-center
+         w-32 h-32 rounded-full bg-[var(--darker-bg)]
+         border border-[var(--neon-cyan)] shadow-xl;
+  animation: pulseGlow 2s infinite;
+}
+
+.status-badge::before {
+  content: '';
+  @apply absolute inset-1 rounded-full;
+  background: radial-gradient(circle at center,
+              rgba(0, 255, 255, 0.1) 0%,
+              transparent 70%);
+}
+
+@keyframes pulseGlow {
+  0% { box-shadow: 0 0 20px rgba(0, 255, 255, 0.2); }
+  50% { box-shadow: 0 0 30px rgba(0, 255, 255, 0.4); }
+  100% { box-shadow: 0 0 20px rgba(0, 255, 255, 0.2); }
+}
+
+/* Card and Container Styles */
+.glass-card {
+  @apply relative overflow-hidden rounded-2xl bg-white/5 backdrop-blur-xl
+         border border-white/10 shadow-xl;
+  animation: fadeIn 0.5s ease-out;
+}
+
+.glass-card::before {
+  content: '';
+  @apply absolute inset-0 bg-gradient-to-br from-white/5 to-transparent;
+  pointer-events: none;
+}
+
+/* Keyboard shortcut styling */
+.kbd {
+  @apply inline-flex items-center justify-center px-2 py-1 text-xs font-mono font-medium
+         bg-gray-800 border border-gray-600 rounded text-gray-300;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Navigation Styles */
+.nav-link {
+  @apply relative px-4 py-2 text-sm font-medium text-gray-300
+         transition-colors duration-200 hover:text-white;
+}
+
+.nav-link::after {
+  content: '';
+  @apply absolute bottom-0 left-0 w-0 h-0.5 bg-[var(--neon-cyan)]
+         transition-all duration-300;
+}
+
+.nav-link:hover::after {
+  @apply w-full;
+}
+
+.nav-link.active {
+  @apply text-white;
+}
+
+.nav-link.active::after {
+  @apply w-full;
+}
+
+/* Responsive Container */
+.responsive-container {
+  @apply container mx-auto px-4 sm:px-6 lg:px-8;
+}
+
+/* Grid Layout */
+.dashboard-grid {
+  @apply grid gap-6 md:grid-cols-2 lg:grid-cols-3;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--darker-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-white/10 rounded-full hover:bg-white/20;
+}
+
+/* Existing styles remain unchanged */
+.neon-text {
+  color: var(--neon-cyan);
+  text-shadow: 0 0 10px var(--neon-cyan),
+               0 0 20px var(--neon-cyan),
+               0 0 30px var(--neon-cyan);
+}
+
+.neon-border {
+  border: 1px solid var(--neon-cyan);
+  box-shadow: 0 0 10px var(--neon-cyan),
+              inset 0 0 5px var(--neon-cyan);
+}
+
+.active-nav-item {
+  background: rgba(0, 255, 255, 0.2);
+  border: 1px solid var(--neon-cyan);
+  box-shadow: 0 0 10px var(--neon-cyan);
+}
+
+.map-overlay {
+  background: rgba(0, 255, 255, 0.1);
+  backdrop-filter: blur(2px);
+}
+
+/* Active zone highlighting */
+.active-zone {
+  animation: zoneGlow 2s infinite alternate;
+}
+
+@keyframes zoneGlow {
+  from {
+    box-shadow: 0 0 10px var(--neon-cyan),
+                inset 0 0 5px var(--neon-cyan);
+  }
+  to {
+    box-shadow: 0 0 20px var(--neon-cyan),
+                inset 0 0 10px var(--neon-cyan);
+  }
+}
+
+/* Traffic Light Card Animations */
+.traffic-light-card {
+  animation: fadeInUp 0.6s ease-out;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.traffic-light-card:hover {
+  animation: cardPulse 0.3s ease-in-out;
+}
+
+@keyframes cardPulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1.05); }
+}
+
+/* Health Page Transitions */
+.health-page-enter {
+  opacity: 0;
+  transform: translateX(20px);
+}
+
+.health-page-enter-active {
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 300ms, transform 300ms;
+}
+
+.health-page-exit {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.health-page-exit-active {
+  opacity: 0;
+  transform: translateX(-20px);
+  transition: opacity 300ms, transform 300ms;
+}
