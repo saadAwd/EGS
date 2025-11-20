@@ -205,8 +205,36 @@ const PoleControl: React.FC<PoleControlProps> = ({
         updatedLamp = await activateLamp(lamp.id);
       }
       
-      // Note: Don't clear pending here - wait for WebSocket ACK
-      // The WebSocket handler will clear pending on ACK
+      // Clear pending state immediately since API call succeeded
+      // The backend has confirmed the command, so we can clear pending
+      // WebSocket ACK will still be handled as a backup confirmation
+      setPendingLampIds(prev => {
+        const next = new Set(prev);
+        next.delete(lamp.id);
+        return next;
+      });
+      setLampCommandStates(prev => {
+        const next = new Map(prev);
+        next.set(lamp.id, 'ack');
+        return next;
+      });
+      
+      // Set a timeout fallback to ensure pending is cleared even if WebSocket ACK doesn't arrive
+      setTimeout(() => {
+        setPendingLampIds(prev => {
+          const next = new Set(prev);
+          next.delete(lamp.id);
+          return next;
+        });
+        setLampCommandStates(prev => {
+          const next = new Map(prev);
+          // Only clear if still in 'ack' state (not failed or retry)
+          if (next.get(lamp.id) === 'ack') {
+            next.delete(lamp.id);
+          }
+          return next;
+        });
+      }, 2000); // 2 second fallback timeout
       
       // Update the specific lamp in the lamps array
       const updatedLamps = lamps.map(l => 
