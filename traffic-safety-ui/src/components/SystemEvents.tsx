@@ -1,7 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useActivationContext } from '../contexts/ActivationContext';
 import { useSystemState } from '../contexts/SystemStateContext';
-import apiClient from '../api/client';
+import { useEmergencyEvents } from '../api/queries';
+import { TableRowSkeleton } from './LoadingSkeleton';
+import { ErrorCard } from './ErrorCard';
 
 interface EmergencyEvent {
   id: number;
@@ -15,55 +18,35 @@ interface EmergencyEvent {
 }
 
 const SystemEvents: React.FC = () => {
+  const queryClient = useQueryClient();
   const { zoneActivation } = useActivationContext();
   const { systemState } = useSystemState();
-  const [events, setEvents] = useState<EmergencyEvent[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<string>('');
+  
+  // React Query hook
+  const { data: events = [], isLoading: loading, error, refetch } = useEmergencyEvents();
+  const lastUpdate = new Date().toLocaleString();
 
-  const fetchEvents = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await apiClient.get('/emergency-events/');
-      setEvents(response.data);
-      setLastUpdate(new Date().toLocaleString());
-    } catch (error) {
-      console.error('Error fetching emergency events:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Auto-refresh every 5 seconds
-  useEffect(() => {
-    fetchEvents();
-    const interval = setInterval(fetchEvents, 5000);
-    return () => clearInterval(interval);
-  }, [fetchEvents]);
-
-  // Update events when system state changes (emergency activated/cleared)
+  // Invalidate events when system state changes
   useEffect(() => {
     if (systemState.isEmergencyActive && systemState.activeZone) {
-      // Emergency is active - refresh events to show new event
       console.log('Emergency active - refreshing events for:', systemState.activeZone);
-      fetchEvents();
+      queryClient.invalidateQueries({ queryKey: ['emergency-events'] });
     } else if (!systemState.isEmergencyActive) {
-      // Emergency cleared - refresh events to get updated duration and status
       console.log('Emergency cleared - refreshing events');
-      fetchEvents();
+      queryClient.invalidateQueries({ queryKey: ['emergency-events'] });
     }
-  }, [systemState.isEmergencyActive, systemState.activeZone]); // Removed fetchEvents to prevent infinite loop
+  }, [systemState.isEmergencyActive, systemState.activeZone, queryClient]);
 
   // Also refresh when local zone activation changes
   useEffect(() => {
     if (zoneActivation.isActivated) {
       console.log('Zone activation detected - refreshing events');
-      fetchEvents();
+      queryClient.invalidateQueries({ queryKey: ['emergency-events'] });
     } else if (!zoneActivation.isActivated && events.some(e => e.status === 'active')) {
       console.log('Zone deactivated - refreshing events');
-      fetchEvents();
+      queryClient.invalidateQueries({ queryKey: ['emergency-events'] });
     }
-  }, [zoneActivation.isActivated]); // Removed fetchEvents and events to prevent infinite loop
+  }, [zoneActivation.isActivated, events, queryClient]);
 
   const formatDuration = (minutes: number | null) => {
     if (minutes === null) return 'Ongoing';
@@ -123,8 +106,47 @@ const SystemEvents: React.FC = () => {
         </div>
         
         {loading ? (
-          <div className="p-6 text-center">
-            <div className="text-gray-400">Loading events...</div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-700">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Zone
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Wind Direction
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Activation Date
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Activation Time
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Clear Time
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Duration
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">
+                    Status
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-gray-800 divide-y divide-gray-700">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <TableRowSkeleton key={i} columns={7} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : error ? (
+          <div className="p-6">
+            <ErrorCard 
+              title="Failed to load events"
+              message={error instanceof Error ? error.message : 'Unable to fetch emergency events'}
+              onRetry={() => refetch()}
+            />
           </div>
         ) : events.length === 0 ? (
           <div className="p-6 text-center">

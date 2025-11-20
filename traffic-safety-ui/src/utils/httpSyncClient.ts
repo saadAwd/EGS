@@ -6,12 +6,13 @@ export interface SyncState {
   zoneName: string | null;
   windDirection: string | null;
   activationTime: string | null;
+  deactivationInProgress?: boolean;
 }
 
 export class HttpSyncClient {
   private baseUrl: string;
   private isPolling: boolean = false;
-  private pollInterval: number = 2000; // 2 seconds
+  private pollInterval: number = 60000; // 60 seconds - lazy fallback for WebSocket
   private pollTimer: NodeJS.Timeout | null = null;
   private onStateChange: ((state: SyncState) => void) | null = null;
 

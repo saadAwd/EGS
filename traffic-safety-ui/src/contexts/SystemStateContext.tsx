@@ -1,6 +1,9 @@
 import React, { createContext, useContext, useState, ReactNode, useEffect, useRef } from 'react';
-import { HttpSyncClient } from '../utils/httpSyncClient';
 import { useActivationContext } from './ActivationContext';
+import { useWebSocketContext } from './WebSocketContext';
+import { ZoneStateMessage, CommandStatusMessage } from '../utils/websocketClient';
+import { useQueryClient } from '@tanstack/react-query';
+import { getBackendUrl } from '../utils/backendConfig';
 
 interface SystemState {
   isEmergencyActive: boolean;
@@ -9,6 +12,7 @@ interface SystemState {
   activationTime: string | null;
   isSystemLocked: boolean;
   allowedFeatures: string[];
+  deactivationInProgress: boolean;
 }
 
 interface SystemStateContextType {
@@ -17,7 +21,6 @@ interface SystemStateContextType {
   activateEmergency: (zoneName: string, windDirection: string) => void;
   deactivateEmergency: () => void;
   isFeatureAllowed: (feature: string) => boolean;
-  syncClient: HttpSyncClient | null;
 }
 
 const SystemStateContext = createContext<SystemStateContextType | undefined>(undefined);
@@ -28,16 +31,18 @@ interface SystemStateProviderProps {
 
 export const SystemStateProvider: React.FC<SystemStateProviderProps> = ({ children }) => {
   const { setZoneActivation, clearZoneActivation } = useActivationContext();
+  const { wsClient } = useWebSocketContext();
+  const queryClient = useQueryClient();
   const [systemState, setSystemState] = useState<SystemState>({
     isEmergencyActive: false,
     activeZone: null,
     windDirection: '',
     activationTime: null,
     isSystemLocked: false,
-    allowedFeatures: ['egs', 'traffic-lights', 'map', 'zone-activation', 'schematic'] // All features allowed by default
+    allowedFeatures: ['egs', 'traffic-lights', 'map', 'zone-activation', 'schematic'], // All features allowed by default
+    deactivationInProgress: false
   });
 
-  const [syncClient] = useState<HttpSyncClient>(() => new HttpSyncClient());
   const systemStateRef = useRef(systemState);
 
   // Keep ref in sync with state
@@ -46,11 +51,14 @@ export const SystemStateProvider: React.FC<SystemStateProviderProps> = ({ childr
   }, [systemState]);
 
   // STATELESS: No localStorage - backend is the only source of truth
-  // On mount, immediately fetch from backend (SystemStateContext will poll after)
+  // On mount, fetch initial state from backend (WebSocket will handle real-time updates)
   useEffect(() => {
     const fetchInitialState = async () => {
       try {
-        const response = await fetch('/api/sync/state');
+        // Get backend URL - use shared utility
+        const backendUrl = getBackendUrl();
+        
+        const response = await fetch(`${backendUrl}/sync/state`);
         if (response.ok) {
           const state = await response.json();
           if (state.isActivated && state.zoneName) {
@@ -60,7 +68,8 @@ export const SystemStateProvider: React.FC<SystemStateProviderProps> = ({ childr
               windDirection: state.windDirection || '',
               activationTime: state.activationTime,
               isSystemLocked: true,
-              allowedFeatures: ['egs', 'zone-activation']
+              allowedFeatures: ['egs', 'zone-activation'],
+              deactivationInProgress: state.deactivationInProgress || false
             });
             systemStateRef.current = {
               isEmergencyActive: true,
@@ -68,8 +77,19 @@ export const SystemStateProvider: React.FC<SystemStateProviderProps> = ({ childr
               windDirection: state.windDirection || '',
               activationTime: state.activationTime,
               isSystemLocked: true,
-              allowedFeatures: ['egs', 'zone-activation']
+              allowedFeatures: ['egs', 'zone-activation'],
+              deactivationInProgress: state.deactivationInProgress || false
             };
+          } else {
+            setSystemState({
+              isEmergencyActive: false,
+              activeZone: null,
+              windDirection: '',
+              activationTime: null,
+              isSystemLocked: false,
+              allowedFeatures: ['egs', 'traffic-lights', 'map', 'zone-activation', 'schematic'],
+              deactivationInProgress: state.deactivationInProgress || false
+            });
           }
         }
       } catch (error) {
@@ -79,75 +99,129 @@ export const SystemStateProvider: React.FC<SystemStateProviderProps> = ({ childr
     fetchInitialState();
   }, []);
 
-  // HTTP polling for real-time sync (optimized to prevent unnecessary updates)
+  // REMOVED: HTTP polling - now using WebSocket only for real-time updates
+  // WebSocket handles all state updates via zone_state messages
+
+  // Subscribe to WebSocket messages for real-time updates (PRIMARY METHOD - no HTTP polling)
   useEffect(() => {
-    const handleStateChange = (state: any) => {
-      // Use ref to check current state without causing effect recreation
+    if (!wsClient) {
+      console.warn('WebSocket client not available, state updates will be delayed');
+      return;
+    }
+
+    // Handle state_sync message (sent on WebSocket connection)
+    const handleStateSync = (data: any) => {
       const currentState = systemStateRef.current;
       
-      // CRITICAL: Ignore deactivation signals if deactivation is in progress
-      // This prevents UI from showing deactivation during the deactivation process
-      if (state.deactivationInProgress) {
-        // Keep current state during deactivation - don't update to false yet
-        return;
-      }
-      
-      // Only update state if it actually changed (prevents flickering)
-      if (state.isActivated) {
-        // Check if state is actually different before updating
-        if (!currentState.isEmergencyActive || 
-            currentState.activeZone !== state.zoneName || 
-            currentState.windDirection !== state.windDirection) {
-          const newSystemState = {
-            isEmergencyActive: true,
-            activeZone: state.zoneName,
-            windDirection: state.windDirection,
-            activationTime: state.activationTime,
-            isSystemLocked: true,
-            allowedFeatures: ['egs', 'zone-activation'] // Only EGS Dashboard and Zone Activation during emergency
-          };
-          setSystemState(newSystemState);
-        }
+      if (data.isActivated && data.zoneName) {
+        const newSystemState = {
+          isEmergencyActive: true,
+          activeZone: data.zoneName,
+          windDirection: data.windDirection || '',
+          activationTime: data.activationTime,
+          isSystemLocked: true,
+          allowedFeatures: ['egs', 'zone-activation'],
+          deactivationInProgress: data.deactivationInProgress || false
+        };
+        setSystemState(newSystemState);
+        systemStateRef.current = newSystemState;
       } else {
-        // CRITICAL: Only deactivate if we're sure it's a real deactivation
-        // Check if emergency was previously active AND we're not in the middle of activation
-        // Add a small delay check to prevent race conditions with activation
-        if (currentState.isEmergencyActive) {
-          // Double-check: if we just activated (within last 2 seconds), ignore deactivation signal
-          // This prevents race condition where polling happens before sync_state is updated
-          const activationTime = currentState.activationTime ? new Date(currentState.activationTime).getTime() : 0;
-          const now = Date.now();
-          const timeSinceActivation = now - activationTime;
-          
-          // If activation happened less than 3 seconds ago, ignore deactivation (might be stale state)
-          if (timeSinceActivation > 0 && timeSinceActivation < 3000) {
-            console.log('Ignoring deactivation signal - activation was recent (possible race condition)');
-            return;
-          }
-          
-          const newSystemState = {
-            isEmergencyActive: false,
-            activeZone: null,
-            windDirection: '',
-            activationTime: null,
-            isSystemLocked: false,
-            allowedFeatures: ['egs', 'traffic-lights', 'zone-activation', 'system-events', 'generate-report'] // All features allowed
-          };
-          setSystemState(newSystemState);
-        }
+        const newSystemState = {
+          isEmergencyActive: false,
+          activeZone: null,
+          windDirection: '',
+          activationTime: null,
+          isSystemLocked: false,
+          allowedFeatures: ['egs', 'traffic-lights', 'zone-activation', 'system-events', 'generate-report'],
+          deactivationInProgress: data.deactivationInProgress || false
+        };
+        setSystemState(newSystemState);
+        systemStateRef.current = newSystemState;
       }
     };
 
-    // Start polling for state changes
-    syncClient.startPolling(handleStateChange);
+    // Handle zone_state messages
+    const handleZoneState = (message: ZoneStateMessage) => {
+      const currentState = systemStateRef.current;
+      
+      if (message.status === 'activated') {
+        const newSystemState = {
+          isEmergencyActive: true,
+          activeZone: message.zone,
+          windDirection: message.windDirection,
+          activationTime: new Date(message.ts).toISOString(),
+          isSystemLocked: true,
+          allowedFeatures: ['egs', 'zone-activation'],
+          deactivationInProgress: false
+        };
+        setSystemState(newSystemState);
+        // Invalidate queries to refresh data
+        queryClient.invalidateQueries({ queryKey: ['lamps'] });
+        queryClient.invalidateQueries({ queryKey: ['emergency-events'] });
+      } else if (message.status === 'deactivating') {
+        // Update deactivationInProgress flag
+        setSystemState({
+          ...currentState,
+          deactivationInProgress: true
+        });
+      } else if (message.status === 'cleared') {
+        const newSystemState = {
+          isEmergencyActive: false,
+          activeZone: null,
+          windDirection: '',
+          activationTime: null,
+          isSystemLocked: false,
+          allowedFeatures: ['egs', 'traffic-lights', 'zone-activation', 'system-events', 'generate-report'],
+          deactivationInProgress: false
+        };
+        setSystemState(newSystemState);
+        // Invalidate queries to refresh data
+        queryClient.invalidateQueries({ queryKey: ['lamps'] });
+        queryClient.invalidateQueries({ queryKey: ['emergency-events'] });
+      }
+    };
+
+    // Handle command_status messages (for lamp operations)
+    const handleCommandStatus = (message: CommandStatusMessage) => {
+      if (message.scope === 'lamp' && message.device_id) {
+        // Invalidate lamps query when we get ACK for lamp commands
+        if (message.state === 'ack' || message.state === 'failed') {
+          queryClient.invalidateQueries({ queryKey: ['lamps'] });
+        }
+      }
+    };
     
-    // Register this client
-    syncClient.registerClient();
+    // Handle lamp_update messages (real-time lamp state changes)
+    const handleLampUpdate = (message: any) => {
+      // Invalidate lamps query to refresh
+      queryClient.invalidateQueries({ queryKey: ['lamps'] });
+    };
+    
+    // Handle weather_update messages
+    const handleWeatherUpdate = (message: any) => {
+      // Invalidate weather query to refresh
+      queryClient.invalidateQueries({ queryKey: ['weather', 'latest'] });
+    };
+    
+    // Handle gateway_status messages
+    const handleGatewayStatus = (message: any) => {
+      // Invalidate gateway status query to refresh
+      queryClient.invalidateQueries({ queryKey: ['gateway', 'status'] });
+    };
+
+    // Register handlers
+    wsClient.onMessage('state_sync', handleStateSync);
+    wsClient.onMessage('zone_state', handleZoneState);
+    wsClient.onMessage('command_status', handleCommandStatus);
+    wsClient.onMessage('lamp_update', handleLampUpdate);
+    wsClient.onMessage('weather_update', handleWeatherUpdate);
+    wsClient.onMessage('gateway_status', handleGatewayStatus);
 
     return () => {
-      syncClient.stopPolling();
+      // Cleanup handlers (WebSocket client doesn't have removeHandler, but we can ignore)
+      // The client will be cleaned up when component unmounts
     };
-  }, [syncClient]); // Only syncClient in dependencies - use ref for state checks
+  }, [wsClient, queryClient]);
 
   // STATELESS: activateEmergency is now a no-op - components send API calls directly
   // SystemStateContext will poll and update state automatically
@@ -175,8 +249,7 @@ export const SystemStateProvider: React.FC<SystemStateProviderProps> = ({ childr
       setSystemState,
       activateEmergency,
       deactivateEmergency,
-      isFeatureAllowed,
-      syncClient
+      isFeatureAllowed
     }}>
       {children}
     </SystemStateContext.Provider>

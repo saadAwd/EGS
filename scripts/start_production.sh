@@ -226,12 +226,16 @@ source venv/bin/activate
 export CR1000_SERIAL_PORT CR1000_BAUD
 
 # Start Gunicorn - ensure it runs from project root with correct environment
+# CRITICAL: WebSocket support requires:
+# - UvicornWorker (supports WebSockets)
+# - Longer timeout for WebSocket connections
+# - Keep-alive for connection stability
 gunicorn complete_backend:app \
   --workers $TSIM_WORKERS \
   --worker-class uvicorn.workers.UvicornWorker \
   --bind $TSIM_HOST:$TSIM_BACKEND_PORT \
-  --timeout 120 \
-  --keep-alive 5 \
+  --timeout 300 \
+  --keep-alive 10 \
   --access-logfile "$TSIM_LOG_DIR/backend_access.log" \
   --error-logfile "$TSIM_LOG_DIR/backend_error.log" \
   --log-level info \
@@ -267,23 +271,35 @@ MAX_WEATHER_WAIT=30
 WEATHER_WAIT_COUNT=0
 
 while [ $WEATHER_WAIT_COUNT -lt $MAX_WEATHER_WAIT ]; do
-    if [ -f "$TSIM_LOG_DIR/backend.log" ]; then
-        # Check if weather worker thread started
-        if grep -q "Weather worker thread started\|WeatherWorker.*Weather worker started" "$TSIM_LOG_DIR/backend.log" 2>/dev/null; then
+    # Check both backend.log and backend_error.log (Gunicorn logs to error log)
+    if [ -f "$TSIM_LOG_DIR/backend_error.log" ]; then
+        # Check if weather worker thread started (look for WEATHER: messages)
+        if grep -q "WEATHER:.*Thread started\|Weather worker thread started\|WEATHER:.*Worker thread function starting" "$TSIM_LOG_DIR/backend_error.log" 2>/dev/null; then
             # Give it a bit more time to actually start polling
             sleep 3
             # Check if it's actually polling (look for poll attempts or data insertion)
-            if grep -q "WeatherWorker.*Poll\|Inserted data\|Weather worker.*Inserted" "$TSIM_LOG_DIR/backend.log" 2>/dev/null; then
+            if grep -q "WEATHER:.*Poll.*ok\|WEATHER:.*Poll #\|Weather worker.*Inserted data\|Inserted data.*T=" "$TSIM_LOG_DIR/backend_error.log" 2>/dev/null; then
                 echo -e "${GREEN}   ✅ Weather worker started and polling${NC}"
                 WEATHER_WORKER_STARTED=1
                 break
-            elif grep -q "Weather worker started\|WeatherWorker.*started" "$TSIM_LOG_DIR/backend.log" 2>/dev/null; then
+            elif grep -q "WEATHER:.*Started - polling\|WEATHER:.*Connected to" "$TSIM_LOG_DIR/backend_error.log" 2>/dev/null; then
                 # Worker started but not polling yet, wait a bit more
-                if [ $WEATHER_WAIT_COUNT -lt 15 ]; then
+                if [ $WEATHER_WAIT_COUNT -lt 20 ]; then
                     sleep 2
                     WEATHER_WAIT_COUNT=$((WEATHER_WAIT_COUNT + 2))
                     continue
                 fi
+            fi
+        fi
+    fi
+    # Also check backend.log (if it exists)
+    if [ -f "$TSIM_LOG_DIR/backend.log" ]; then
+        if grep -q "WEATHER:.*Thread started\|Weather worker thread started\|WEATHER:.*Worker thread function starting" "$TSIM_LOG_DIR/backend.log" 2>/dev/null; then
+            sleep 3
+            if grep -q "WEATHER:.*Poll.*ok\|WEATHER:.*Poll #\|Weather worker.*Inserted data" "$TSIM_LOG_DIR/backend.log" 2>/dev/null; then
+                echo -e "${GREEN}   ✅ Weather worker started and polling${NC}"
+                WEATHER_WORKER_STARTED=1
+                break
             fi
         fi
     fi
@@ -295,11 +311,15 @@ while [ $WEATHER_WAIT_COUNT -lt $MAX_WEATHER_WAIT ]; do
 done
 
 if [ $WEATHER_WORKER_STARTED -eq 0 ]; then
-    echo -e "${YELLOW}   ⚠️  Weather worker may not have started properly (check logs: tail -50 $TSIM_LOG_DIR/backend.log | grep Weather)${NC}"
+    echo -e "${YELLOW}   ⚠️  Weather worker may not have started properly${NC}"
+    echo -e "${YELLOW}   Check logs: tail -50 $TSIM_LOG_DIR/backend_error.log | grep -i weather${NC}"
     # Show last few weather-related log lines for debugging
-    if [ -f "$TSIM_LOG_DIR/backend.log" ]; then
+    if [ -f "$TSIM_LOG_DIR/backend_error.log" ]; then
         echo -e "${YELLOW}   Last weather worker log entries:${NC}"
-        tail -20 "$TSIM_LOG_DIR/backend.log" | grep -i weather | tail -5 || echo "   (no weather logs found)"
+        tail -30 "$TSIM_LOG_DIR/backend_error.log" | grep -i "WEATHER\|weather" | tail -5 || echo "   (no weather logs found)"
+    fi
+    if [ -f "$TSIM_LOG_DIR/backend.log" ]; then
+        tail -30 "$TSIM_LOG_DIR/backend.log" | grep -i "WEATHER\|weather" | tail -5 || true
     fi
 fi
 
@@ -392,6 +412,7 @@ echo ""
 echo -e "${GREEN}🌐 System Access URLs:${NC}"
 echo -e "   Frontend:     ${YELLOW}http://$LOCAL_IP:$TSIM_FRONTEND_PORT${NC}"
 echo -e "   Backend API:  ${YELLOW}http://$LOCAL_IP:$TSIM_BACKEND_PORT${NC}"
+echo -e "   WebSocket:    ${YELLOW}ws://$LOCAL_IP:$TSIM_BACKEND_PORT/ws${NC}"
 echo -e "   API Docs:     ${YELLOW}http://$LOCAL_IP:$TSIM_BACKEND_PORT/docs${NC}"
 echo ""
 echo -e "${GREEN}📊 System Status:${NC}"

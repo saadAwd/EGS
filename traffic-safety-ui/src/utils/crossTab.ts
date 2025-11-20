@@ -1,7 +1,7 @@
 // crossTab.ts
 const channel = new BroadcastChannel('alarm-control');
 
-export function sendAlarm(cmd: 'PLAY'|'STOP'|'ACK', payload?: any) {
+export function sendAlarm(cmd: 'PLAY'|'STOP'|'ACK'|'RESET_SUPPRESSION', payload?: any) {
   channel.postMessage({ cmd, payload, ts: Date.now() });
 }
 

@@ -17,6 +17,10 @@ interface LampIndicatorProps {
   showLabel?: boolean;
   interactive?: boolean;
   onToggle?: (lamp: Lamp) => void;
+  disabled?: boolean;
+  pending?: boolean;
+  failed?: boolean;
+  commandState?: 'queued' | 'sent' | 'ack' | 'failed';
 }
 
 const LampIndicator: React.FC<LampIndicatorProps> = ({
@@ -24,7 +28,11 @@ const LampIndicator: React.FC<LampIndicatorProps> = ({
   size = 'md',
   showLabel = true,
   interactive = false,
-  onToggle
+  onToggle,
+  disabled = false,
+  pending = false,
+  failed = false,
+  commandState
 }) => {
   const sizeClasses = {
     sm: 'w-6 h-6 text-xs',
@@ -51,7 +59,7 @@ const LampIndicator: React.FC<LampIndicatorProps> = ({
   };
 
   const handleClick = () => {
-    if (interactive && onToggle) {
+    if (interactive && onToggle && !disabled) {
       onToggle(lamp);
     }
   };
@@ -59,18 +67,36 @@ const LampIndicator: React.FC<LampIndicatorProps> = ({
   return (
     <div className="flex flex-col items-center space-y-1">
       <div
+        role="button"
+        tabIndex={interactive && !disabled && !pending && !failed ? 0 : -1}
+        aria-label={`${lamp.gateway_id} ${lamp.direction} lamp ${lamp.is_on ? 'ON' : 'OFF'}. ${failed ? 'Command failed' : pending ? `Command ${commandState || 'pending'}` : interactive ? `Click to turn ${lamp.is_on ? 'OFF' : 'ON'}` : ''}`}
         className={`
           ${sizeClasses[size]}
           rounded-lg border-2 flex items-center justify-center font-bold
           transition-all duration-200 ease-in-out
           ${lamp.is_on 
             ? 'bg-yellow-300 border-yellow-400 shadow-lg shadow-yellow-300/50' 
-            : 'bg-white border-gray-300 hover:border-gray-400'
+            : failed
+              ? 'bg-red-200 border-red-400'
+              : pending
+                ? 'bg-blue-200 border-blue-400 animate-pulse'
+                : 'bg-white border-gray-300 hover:border-gray-400'
           }
-          ${interactive ? 'cursor-pointer hover:scale-105 active:scale-95' : ''}
+          ${interactive && !disabled && !pending && !failed ? 'cursor-pointer hover:scale-105 active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500' : ''}
+          ${disabled || pending || failed ? 'opacity-50 cursor-not-allowed' : ''}
         `}
         onClick={handleClick}
-        title={`${lamp.gateway_id}: ${lamp.direction} ${lamp.is_on ? '(ON)' : '(OFF)'}`}
+        onKeyDown={(e) => {
+          if (interactive && !disabled && !pending && !failed && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            handleClick();
+          }
+        }}
+        title={`${lamp.gateway_id}: ${lamp.direction} ${
+          failed ? '(Failed)' : 
+          pending ? `(${commandState || 'Pending'}...)` : 
+          lamp.is_on ? '(ON)' : '(OFF)'
+        }`}
       >
         <span className={`${getDirectionColor(lamp.direction)} ${lamp.is_on ? 'text-gray-800' : ''} text-lg`}>
           {getDirectionIcon(lamp.direction)}

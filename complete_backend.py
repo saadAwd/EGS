@@ -3,10 +3,10 @@
 Complete TSIM Backend with Emergency Events Tracking and ESP32 Gateway Integration
 """
 
-from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi import FastAPI, HTTPException, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 from datetime import datetime, timezone, timedelta
 import sqlite3
 import os
@@ -14,6 +14,7 @@ import uvicorn
 import asyncio
 import logging
 import json
+import queue
 
 # GMT+3 timezone (UTC+3)
 GMT3 = timezone(timedelta(hours=3))
@@ -264,6 +265,88 @@ _sync_state = {
 }
 _sync_lock = threading.RLock()  # Thread-safe access
 
+# WebSocket connection manager
+class WebSocketManager:
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()
+        self.lock = threading.RLock()
+        self.broadcast_queue = queue.Queue()  # Thread-safe queue for broadcasts from worker threads
+        self.event_loop = None  # Will be set on startup
+        self._queue_task = None  # Background task to process queue
+    
+    def set_event_loop(self, loop):
+        """Set the event loop for processing broadcast queue"""
+        self.event_loop = loop
+        # Start background task to process queue
+        self._queue_task = asyncio.create_task(self._process_broadcast_queue())
+    
+    async def _process_broadcast_queue(self):
+        """Process broadcast queue in background"""
+        while True:
+            try:
+                # Check queue with timeout using executor
+                loop = asyncio.get_event_loop()
+                try:
+                    message = await loop.run_in_executor(
+                        None, 
+                        lambda: self.broadcast_queue.get(timeout=1.0)
+                    )
+                    await self.broadcast(message)
+                    self.broadcast_queue.task_done()
+                except queue.Empty:
+                    # Timeout is normal, continue
+                    await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Error processing broadcast queue: {e}")
+                await asyncio.sleep(1)
+    
+    async def connect(self, websocket: WebSocket):
+        """Add WebSocket to active connections (connection should already be accepted)"""
+        with self.lock:
+            self.active_connections.add(websocket)
+        logger.info(f"✅ WebSocketManager: Client added. Total connections: {len(self.active_connections)}")
+    
+    def disconnect(self, websocket: WebSocket):
+        with self.lock:
+            self.active_connections.discard(websocket)
+        logger.info(f"WebSocket client disconnected. Total connections: {len(self.active_connections)}")
+    
+    def broadcast_thread_safe(self, message: dict):
+        """Thread-safe broadcast - can be called from worker threads"""
+        try:
+            self.broadcast_queue.put_nowait(message)
+        except queue.Full:
+            logger.warning("Broadcast queue full, dropping message")
+        except Exception as e:
+            logger.error(f"Error queuing broadcast message: {e}")
+    
+    async def broadcast(self, message: dict):
+        """Broadcast message to all connected clients"""
+        if not self.active_connections:
+            return
+        
+        message_json = json.dumps(message)
+        disconnected = set()
+        
+        with self.lock:
+            connections = list(self.active_connections)
+        
+        for connection in connections:
+            try:
+                await connection.send_text(message_json)
+            except Exception as e:
+                logger.error(f"Error sending WebSocket message: {e}")
+                disconnected.add(connection)
+        
+        # Remove disconnected clients
+        if disconnected:
+            with self.lock:
+                for conn in disconnected:
+                    self.active_connections.discard(conn)
+            logger.info(f"Removed {len(disconnected)} disconnected WebSocket clients")
+
+# Global WebSocket manager instance
+websocket_manager = WebSocketManager()
 
 # CORS middleware
 app.add_middleware(
@@ -364,10 +447,38 @@ async def get_weather_health():
         }
 
 # Emergency Events endpoints
+def _ensure_emergency_events_table():
+    """Ensure emergency_events table exists"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS emergency_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                zone_name TEXT NOT NULL,
+                wind_direction TEXT NOT NULL,
+                activation_date TEXT NOT NULL,
+                activation_time TEXT NOT NULL,
+                clear_time TEXT,
+                duration_minutes INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logger.debug("Emergency events table ensured")
+    except Exception as e:
+        logger.error(f"Error ensuring emergency_events table: {e}")
+
 @app.get("/api/emergency-events/", response_model=List[EmergencyEvent])
 async def get_emergency_events():
-    """Get all emergency events"""
+    """Get all emergency events (both active and cleared)"""
     try:
+        # Ensure table exists before querying
+        _ensure_emergency_events_table()
+        
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -392,15 +503,21 @@ async def get_emergency_events():
             ))
         
         conn.close()
+        logger.info(f"Retrieved {len(events)} emergency events (active + cleared)")
         return events
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        logger.error(f"Error getting emergency events: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Return empty array instead of error to prevent UI breakage
+        return []
 
 @app.post("/api/emergency-events/", response_model=EmergencyEvent)
 async def create_emergency_event(event: EmergencyEventCreate):
     """Create a new emergency event"""
     try:
+        _ensure_emergency_events_table()
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -431,6 +548,7 @@ async def create_emergency_event(event: EmergencyEventCreate):
 async def clear_emergency_event(event_id: int):
     """Clear an emergency event"""
     try:
+        _ensure_emergency_events_table()
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -484,6 +602,7 @@ async def clear_emergency_event(event_id: int):
 async def create_emergency_from_activation(zone_name: str = Query(...), wind_direction: str = Query(...)):
     """Create emergency event when zone is activated and send gateway commands"""
     try:
+        _ensure_emergency_events_table()
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -513,12 +632,32 @@ async def create_emergency_from_activation(zone_name: str = Query(...), wind_dir
         gateway_success = await send_zone_activation_commands(zone_name, wind_direction)
         
         # Update sync state for concurrent UI updates (tablets/screens)
+        activation_time_iso = datetime.now().isoformat()
         with _sync_lock:
             _sync_state["isActivated"] = True
             _sync_state["zoneName"] = zone_name
             _sync_state["windDirection"] = wind_direction
-            _sync_state["activationTime"] = datetime.now().isoformat()
+            _sync_state["activationTime"] = activation_time_iso
         logger.info(f"Sync state updated: Zone {zone_name} {wind_direction} activated")
+        
+        # Broadcast WebSocket message for zone activation
+        await websocket_manager.broadcast({
+            "type": "zone_state",
+            "status": "activated",
+            "zone": zone_name,
+            "windDirection": wind_direction,
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
+        
+        # Also send legacy format for compatibility
+        await websocket_manager.broadcast({
+            "type": "emergency_activated",
+            "data": {
+                "zoneName": zone_name,
+                "windDirection": wind_direction,
+                "activationTime": activation_time_iso
+            }
+        })
         
         return {
             "message": "Emergency event created successfully",
@@ -561,6 +700,7 @@ async def clear_emergency_from_deactivation():
         if cleared > 0:
             logger.info(f"🧹 Cleared {cleared} pending commands from queue")
         
+        _ensure_emergency_events_table()
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -756,19 +896,21 @@ _WEATHER_CACHE: Dict[str, Optional[float | str]] = {
 }
 
 def _resolve_cr1000_port():
-    """Resolve CR1000 serial port with Linux autodetect"""
-    # Use explicit port if set
+    """Resolve CR1000 serial port with cross-platform autodetect"""
+    # Use explicit port if set (highest priority)
     explicit_port = os.getenv("CR1000_SERIAL_PORT")
     if explicit_port:
         log_always(f"WEATHER: Using explicit port from CR1000_SERIAL_PORT: {explicit_port}")
         return explicit_port
     
-    # Autodetect on Linux: try /dev/ttyUSB* and /dev/ttyACM*
+    # Autodetect based on platform
     import glob
     import platform
     
-    if platform.system() == "Linux":
-        # Try ttyUSB first (most common)
+    system = platform.system()
+    
+    if system == "Linux":
+        # Try ttyUSB first (most common on Linux)
         usb_ports = sorted(glob.glob("/dev/ttyUSB*"))
         if usb_ports:
             resolved = usb_ports[0]
@@ -782,27 +924,60 @@ def _resolve_cr1000_port():
             log_always(f"WEATHER: Autodetected port: {resolved} (from /dev/ttyACM*)")
             return resolved
     
-    # Default fallback
-    default_port = "/dev/ttyUSB0"
-    log_always(f"WEATHER: Using default port: {default_port}")
+    elif system == "Darwin":  # macOS
+        # Try cu.usbserial* (macOS USB serial)
+        cu_ports = sorted(glob.glob("/dev/cu.usbserial*"))
+        if cu_ports:
+            resolved = cu_ports[0]
+            log_always(f"WEATHER: Autodetected port: {resolved} (from /dev/cu.usbserial*)")
+            return resolved
+        
+        # Try tty.usbserial* as fallback
+        tty_ports = sorted(glob.glob("/dev/tty.usbserial*"))
+        if tty_ports:
+            resolved = tty_ports[0]
+            log_always(f"WEATHER: Autodetected port: {resolved} (from /dev/tty.usbserial*)")
+            return resolved
+    
+    # Default fallback (platform-specific)
+    if system == "Darwin":
+        default_port = "/dev/cu.usbserial-1230"
+    else:
+        default_port = "/dev/ttyUSB0"
+    log_always(f"WEATHER: Using default port: {default_port} (no device detected)")
     return default_port
 
 def get_cr1000_client():
     """Get or create CR1000 client singleton"""
     global _CR1000_CLIENT
     if not _CR1000_AVAILABLE:
+        log_always("WEATHER: CR1000 library not available")
         return None
-    if _CR1000_CLIENT is None:
-        port = _resolve_cr1000_port()
-        baud = int(os.getenv("CR1000_BAUD", "9600"))
+    
+    # Always resolve port fresh (in case device was reconnected)
+    port = _resolve_cr1000_port()
+    baud = int(os.getenv("CR1000_BAUD", "9600"))
+    
+    # Check if port exists
+    if not os.path.exists(port):
+        log_always(f"WEATHER: Port {port} does not exist - device not connected")
+        _CR1000_CLIENT = None  # Clear client if port doesn't exist
+        return None
+    
+    # Create new client if needed or if port changed
+    if _CR1000_CLIENT is None or (hasattr(_CR1000_CLIENT, 'url') and port not in _CR1000_CLIENT.url):
         try:
-            _CR1000_CLIENT = CR1000Client(port=port, baud=baud)
+            _CR1000_CLIENT = CR1000Client(serial_port=port, baud=baud)
             log_always(f"WEATHER: Client initialized - {port} @ {baud}")
             logger.info(f"CR1000 client initialized: {port} @ {baud}")
         except Exception as e:
             log_always(f"WEATHER: Failed to initialize client - {e}")
             logger.error(f"Failed to initialize CR1000 client: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            _CR1000_CLIENT = None
             return None
+    
     return _CR1000_CLIENT
 
 @app.get("/api/weather/latest")
@@ -865,6 +1040,16 @@ async def get_weather():
         if any(v is not None for v in resp.values()):
             _insert_weather_row(resp.get("record_time"), resp.get("temperature_c"), resp.get("wind_speed_ms"), resp.get("wind_direction_deg"))
             _WEATHER_CACHE.update(resp)
+            
+            # Broadcast weather update via WebSocket (use same format as worker)
+            if resp.get("temperature_c") is not None or resp.get("wind_speed_ms") is not None:
+                await websocket_manager.broadcast({
+                    "type": "weather_update",
+                    "data": {
+                        "id": 0,
+                        **resp
+                    }
+                })
         return {"id": 0, **_WEATHER_CACHE}
     except Exception as e:
         logger.warning(f"/api/weather/latest error: {e}")
@@ -990,6 +1175,7 @@ def _start_weather_worker() -> None:
     def worker():
         import time
         import traceback
+        global _CR1000_CLIENT  # Declare global at function start
         log_always("WEATHER: Worker thread function starting")
         
         # Retry loop for client initialization with backoff
@@ -1022,14 +1208,61 @@ def _start_weather_worker() -> None:
             return
         
         log_always("WEATHER: Started - polling CR1000 every 60 seconds")
+        poll_count = 0
+        error_count = 0
+        success_count = 0
+        
         while True:
+            poll_count += 1
             try:
+                # Check if client is still valid (port might have changed)
+                current_port = _resolve_cr1000_port()
+                if not os.path.exists(current_port):
+                    log_always(f"WEATHER: Port {current_port} not found - device disconnected")
+                    # Reset client to trigger reconnection
+                    with _CR1000_LOCK:
+                        _CR1000_CLIENT = None
+                    client = None
+                    # Wait and retry connection
+                    time.sleep(10)
+                    try:
+                        client = get_cr1000_client()
+                        if client:
+                            log_always(f"WEATHER: Reconnected to {current_port}")
+                        else:
+                            log_always(f"WEATHER: Failed to reconnect - will retry in 60s")
+                    except Exception as e:
+                        log_always(f"WEATHER: Reconnection failed - {e}")
+                    time.sleep(50)  # Total 60s wait
+                    continue
+                
                 # Fetch data directly (no asyncio needed - this is a regular function)
                 with _CR1000_LOCK:
-                    rec = client.latest() or {}
-                    if not rec:
-                        rows = client.range(15)
-                        rec = rows[-1] if rows else {}
+                    try:
+                        rec = client.latest() or {}
+                        if not rec:
+                            rows = client.range(15)
+                            rec = rows[-1] if rows else {}
+                    except Exception as fetch_error:
+                        # Handle StandardError and other exceptions from pycampbellcr1000
+                        error_str = str(fetch_error)
+                        if "StandardError" in error_str or "could not open port" in error_str.lower():
+                            log_always(f"WEATHER: Connection error - {fetch_error}")
+                            # Reset client to force reconnection
+                            _CR1000_CLIENT = None
+                            client = None
+                            error_count += 1
+                            time.sleep(10)  # Short wait before retry
+                            try:
+                                client = get_cr1000_client()
+                                if client:
+                                    log_always(f"WEATHER: Reconnected after error")
+                            except:
+                                pass
+                            time.sleep(50)  # Total 60s wait
+                            continue
+                        else:
+                            raise  # Re-raise if not a connection error
                 
                 if rec:
                     record_time_str = rec.get("Datetime")
@@ -1064,8 +1297,23 @@ def _start_weather_worker() -> None:
                     if any(v is not None for v in [resp["temperature_c"], resp["wind_speed_ms"], resp["wind_direction_deg"]]):
                         _WEATHER_CACHE.update(resp)
                         _insert_weather_row(resp["record_time"], resp["temperature_c"], resp["wind_speed_ms"], resp["wind_direction_deg"])
-                        log_always(f"WEATHER: Poll ok - T={resp['temperature_c']}°C, WS={resp['wind_speed_ms']} m/s, WD={resp['wind_direction_deg']}°")
+                        success_count += 1
+                        log_always(f"WEATHER: Poll #{poll_count} ok - T={resp['temperature_c']}°C, WS={resp['wind_speed_ms']} m/s, WD={resp['wind_direction_deg']}° (Success: {success_count}, Errors: {error_count})")
                         logger.info(f"Weather worker: Inserted data - T={resp['temperature_c']}°C, WS={resp['wind_speed_ms']} m/s, WD={resp['wind_direction_deg']}°")
+                        
+                        # Broadcast weather update via WebSocket (thread-safe)
+                        # Note: Frontend expects message.data to contain the weather data
+                        try:
+                            websocket_manager.broadcast_thread_safe({
+                                "type": "weather_update",
+                                "data": {
+                                    "id": 0,
+                                    **resp
+                                }
+                            })
+                            logger.debug("Weather worker: Queued weather_update for WebSocket broadcast")
+                        except Exception as ws_error:
+                            logger.warning(f"Weather worker: Failed to queue WebSocket update: {ws_error}")
                     else:
                         log_always("WEATHER: Poll warning - No valid data fields found in CR1000 response")
                         logger.warning("Weather worker: No valid data fields found in CR1000 response")
@@ -1073,9 +1321,17 @@ def _start_weather_worker() -> None:
                     log_always("WEATHER: Poll warning - Empty response from CR1000")
                     logger.warning("Weather worker: Empty response from CR1000")
             except Exception as e:
-                log_always(f"WEATHER: Poll error - {e}")
+                error_count += 1
+                error_str = str(e)
+                log_always(f"WEATHER: Poll #{poll_count} error - {error_str} (Success: {success_count}, Errors: {error_count})")
                 logger.error(f"Weather worker error: {e}")
                 logger.debug(traceback.format_exc())
+                
+                # If connection error, reset client
+                if "could not open port" in error_str.lower() or "StandardError" in error_str:
+                    with _CR1000_LOCK:
+                        _CR1000_CLIENT = None
+                    client = None
             finally:
                 time.sleep(60)  # Poll every 60 seconds
     
@@ -1087,12 +1343,85 @@ def _start_weather_worker() -> None:
     logger.info("Weather worker thread started")
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
+    """Initialize backend on startup - clear any stale sync state and initialize services"""
     log_always("TSIM: Application startup")
+    
+    # Set event loop for WebSocket manager to process broadcast queue
+    websocket_manager.set_event_loop(asyncio.get_event_loop())
+    
+    # CRITICAL: Clear ALL active zones on startup to ensure clean state
+    log_always("🧹 Startup: Clearing all active zones and emergency events...")
+    
+    # 1. Clear sync state
+    with _sync_lock:
+        if _sync_state.get("isActivated"):
+            log_always(f"⚠️  Startup: Clearing stale sync_state (was activated: {_sync_state.get('zoneName')})")
+        _sync_state["isActivated"] = False
+        _sync_state["zoneName"] = None
+        _sync_state["windDirection"] = None
+        _sync_state["activationTime"] = None
+        _sync_state["deactivationInProgress"] = False
+    
+    # 2. Clear all active emergency events from database
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now()
+        clear_time = now.strftime("%H:%M:%S")
+        clear_date = now.strftime("%Y-%m-%d")
+        
+        # Get all active events (ONLY events with status='active')
+        # IMPORTANT: Historical cleared events are NOT touched - they remain for reports
+        cursor.execute('SELECT id, zone_name, wind_direction, activation_date, activation_time FROM emergency_events WHERE status = ?', ('active',))
+        active_events = cursor.fetchall()
+        
+        if active_events:
+            log_always(f"🧹 Startup: Found {len(active_events)} active emergency events - marking as cleared (preserving for reports)")
+            for event in active_events:
+                event_id, zone_name, wind_direction, activation_date, activation_time = event
+                # Calculate duration
+                try:
+                    activation_datetime = datetime.strptime(f"{activation_date} {activation_time}", "%Y-%m-%d %H:%M:%S")
+                    clear_datetime = datetime.strptime(f"{clear_date} {clear_time}", "%Y-%m-%d %H:%M:%S")
+                    duration = int((clear_datetime - activation_datetime).total_seconds() / 60)
+                except:
+                    duration = 0
+                
+                # UPDATE status to 'cleared' - event is NOT deleted, preserved for reports
+                cursor.execute('''
+                    UPDATE emergency_events 
+                    SET clear_time = ?, duration_minutes = ?, status = 'cleared', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (clear_time, duration, event_id))
+                log_always(f"   ✅ Marked event {event_id} as cleared: {zone_name} {wind_direction} (preserved for reports)")
+        
+        conn.commit()
+        conn.close()
+        log_always("✅ Startup: All active emergency events marked as cleared (historical events preserved)")
+    except Exception as e:
+        log_always(f"⚠️  Startup: Error clearing emergency events: {e}")
+    
+    # 3. Clear gateway service active zone
+    try:
+        gateway_service = get_gateway_service()
+        gateway_service.unregister_active_zone()
+        gateway_service.clear_command_queue()
+        log_always("✅ Startup: Gateway service active zone cleared")
+    except Exception as e:
+        log_always(f"⚠️  Startup: Error clearing gateway service: {e}")
+    
+    # Initialize database tables
     _ensure_weather_table()
     log_always("TSIM: Weather table ensured")
+    _ensure_lamps_table()
+    log_always("TSIM: Lamps table ensured")
+    _ensure_emergency_events_table()
+    log_always("TSIM: Emergency events table ensured")
+    
+    # Start weather worker
     _start_weather_worker()
-    log_always("TSIM: Startup event complete")
+    log_always("✅ TSIM: Startup complete - all active zones cleared, system is clean")
 
 @app.get("/api/sensor-data/latest-with-signal/")
 async def get_latest_sensor_data_with_signal(limit: int = 50):
@@ -1212,6 +1541,30 @@ async def api_deactivate_zone(req: Optional[ZoneDeactivationRequest] = None):
             _sync_state["deactivationInProgress"] = False
         log_always("DEACTIVATION: Completed - deactivationInProgress flag cleared")
         
+        # Broadcast WebSocket message for zone deactivation
+        if zone_name and wind_direction:
+            await websocket_manager.broadcast({
+                "type": "zone_state",
+                "status": "cleared",
+                "zone": zone_name,
+                "windDirection": wind_direction,
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
+        else:
+            await websocket_manager.broadcast({
+                "type": "zone_state",
+                "status": "cleared",
+                "zone": None,
+                "windDirection": None,
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
+        
+        # Also send legacy format for compatibility
+        await websocket_manager.broadcast({
+            "type": "emergency_deactivated",
+            "data": {}
+        })
+        
         # CRITICAL: Resume assertion AFTER all deactivation is complete
         gateway_service.resume_assertion()
         
@@ -1237,11 +1590,39 @@ async def activate_lamp(lamp_id: int):
     """Activate a specific lamp by ID (Traffic Light Management - separate from Zone Activation)"""
     try:
         gateway_service = get_gateway_service()
+        
+        # Broadcast command_status: queued
+        await websocket_manager.broadcast({
+            "type": "command_status",
+            "scope": "lamp",
+            "device_id": lamp_id,
+            "cmd": "ON",
+            "state": "queued",
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
+        
         success = await gateway_service.send_lamp_command(lamp_id, True, flash=False)
 
         if success:
             # Save state to database for Traffic Light Management
             _update_lamp_state_in_db(lamp_id, True)
+            
+            # Broadcast command_status: ack and lamp_update
+            await websocket_manager.broadcast({
+                "type": "command_status",
+                "scope": "lamp",
+                "device_id": lamp_id,
+                "cmd": "ON",
+                "state": "ack",
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
+            
+            await websocket_manager.broadcast({
+                "type": "lamp_update",
+                "lamp_id": lamp_id,
+                "is_on": True,
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
             
             # Return the lamp object with updated state for frontend
             return {
@@ -1257,10 +1638,28 @@ async def activate_lamp(lamp_id: int):
                 "gateway_command_off": ["a", "c", "e", "g", "i", "k", "m", "o", "q"][(lamp_id - 1) % 9]
             }
         else:
+            # Broadcast command_status: failed
+            await websocket_manager.broadcast({
+                "type": "command_status",
+                "scope": "lamp",
+                "device_id": lamp_id,
+                "cmd": "ON",
+                "state": "failed",
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
             raise HTTPException(status_code=500, detail=f"Failed to activate lamp {lamp_id}")
 
     except Exception as e:
         logger.error(f"Error activating lamp {lamp_id}: {str(e)}")
+        # Broadcast command_status: failed on exception
+        await websocket_manager.broadcast({
+            "type": "command_status",
+            "scope": "lamp",
+            "device_id": lamp_id,
+            "cmd": "ON",
+            "state": "failed",
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.post("/api/gateway/connect")
@@ -1269,6 +1668,13 @@ async def connect_gateway():
     try:
         gateway_service = get_gateway_service()
         is_connected = gateway_service.ensure_connected()
+        
+        # Broadcast gateway status update
+        await websocket_manager.broadcast({
+            "type": "gateway_status",
+            "state": "READY" if is_connected else "DISCONNECTED",
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
         
         if is_connected:
             # Return the full gateway status object that frontend expects
@@ -1322,20 +1728,52 @@ async def get_gateway_status():
         # Do not send a frame here; just report socket state
         is_connected = gateway_service.is_connected()
         
+        # Get queue depth
+        queue_depth = gateway_service.command_queue.qsize() if hasattr(gateway_service, 'command_queue') else 0
+        
+        # Get device status (convert datetime to ISO string for JSON serialization)
+        device_status = {}
+        if hasattr(gateway_service, 'device_status'):
+            for device, status in gateway_service.device_status.items():
+                last_ack = status.get('last_ack_time')
+                if last_ack:
+                    if isinstance(last_ack, datetime):
+                        last_ack_str = last_ack.isoformat()
+                    elif hasattr(last_ack, 'isoformat'):
+                        last_ack_str = last_ack.isoformat()
+                    else:
+                        last_ack_str = str(last_ack)
+                else:
+                    last_ack_str = None
+                
+                device_status[device] = {
+                    "last_ack_time": last_ack_str,
+                    "last_command": status.get('last_command'),
+                    "success_rate": status.get('success_rate', 1.0),
+                    "total_commands": status.get('total_commands', 0),
+                    "successful_commands": status.get('successful_commands', 0)
+                }
+        
         # Return format that matches frontend GatewayStatus interface
         return {
-            "status": "connected" if is_connected else "disconnected",
+            "gateway_connected": is_connected,
+            "connection_status": "connected" if is_connected else "disconnected",
+            "queue_depth": queue_depth,
+            "device_status": device_status,
             "ip_address": gateway_service.esp32_ip,
             "tcp_port": gateway_service.tcp_port,
             "wifi_ssid": gateway_service.wifi_ssid,
             "available_switches": 126,  # Full system coverage
-            "last_heartbeat": gateway_service.last_heartbeat
+            "last_heartbeat": gateway_service.last_heartbeat.isoformat() if gateway_service.last_heartbeat else None
         }
         
     except Exception as e:
         logger.error(f"Error getting gateway status: {str(e)}")
         return {
-            "status": "error",
+            "gateway_connected": False,
+            "connection_status": "error",
+            "queue_depth": 0,
+            "device_status": {},
             "ip_address": "192.168.4.1",
             "tcp_port": 9000,
             "wifi_ssid": "ESP32_AP",
@@ -1349,11 +1787,39 @@ async def deactivate_lamp(lamp_id: int):
     """Deactivate a specific lamp by ID (Traffic Light Management - separate from Zone Activation)"""
     try:
         gateway_service = get_gateway_service()
+        
+        # Broadcast command_status: queued
+        await websocket_manager.broadcast({
+            "type": "command_status",
+            "scope": "lamp",
+            "device_id": lamp_id,
+            "cmd": "OFF",
+            "state": "queued",
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
+        
         success = await gateway_service.send_lamp_command(lamp_id, False, flash=False)
 
         if success:
             # Save state to database for Traffic Light Management
             _update_lamp_state_in_db(lamp_id, False)
+            
+            # Broadcast command_status: ack and lamp_update
+            await websocket_manager.broadcast({
+                "type": "command_status",
+                "scope": "lamp",
+                "device_id": lamp_id,
+                "cmd": "OFF",
+                "state": "ack",
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
+            
+            await websocket_manager.broadcast({
+                "type": "lamp_update",
+                "lamp_id": lamp_id,
+                "is_on": False,
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
             
             # Return the lamp object with updated state for frontend
             return {
@@ -1369,10 +1835,28 @@ async def deactivate_lamp(lamp_id: int):
                 "gateway_command_off": ["a", "c", "e", "g", "i", "k", "m", "o", "q"][(lamp_id - 1) % 9]
             }
         else:
+            # Broadcast command_status: failed
+            await websocket_manager.broadcast({
+                "type": "command_status",
+                "scope": "lamp",
+                "device_id": lamp_id,
+                "cmd": "OFF",
+                "state": "failed",
+                "ts": int(datetime.now().timestamp() * 1000)
+            })
             raise HTTPException(status_code=500, detail=f"Failed to deactivate lamp {lamp_id}")
 
     except Exception as e:
         logger.error(f"Error deactivating lamp {lamp_id}: {str(e)}")
+        # Broadcast command_status: failed on exception
+        await websocket_manager.broadcast({
+            "type": "command_status",
+            "scope": "lamp",
+            "device_id": lamp_id,
+            "cmd": "OFF",
+            "state": "failed",
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.patch("/api/poles/{pole_id}/activate-all")
@@ -1932,6 +2416,156 @@ async def get_health():
     except Exception as e:
         logger.error(f"Error getting health status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.post("/api/system/clear-all-active-zones")
+async def clear_all_active_zones():
+    """Clear all active zones from the system - emergency cleanup endpoint
+    
+    This endpoint:
+    1. Clears sync_state (in-memory)
+    2. Clears all active emergency events from database
+    3. Clears gateway service active zone
+    4. Broadcasts zone_state cleared to all WebSocket clients
+    """
+    try:
+        cleared_zones = []
+        
+        # 1. Clear sync state
+        with _sync_lock:
+            if _sync_state.get("isActivated"):
+                cleared_zones.append(f"{_sync_state.get('zoneName')} {_sync_state.get('windDirection')}")
+            _sync_state["isActivated"] = False
+            _sync_state["zoneName"] = None
+            _sync_state["windDirection"] = None
+            _sync_state["activationTime"] = None
+            _sync_state["deactivationInProgress"] = False
+        logger.info("🧹 Cleared sync_state")
+        
+        # 2. Clear all active emergency events from database
+        # IMPORTANT: Events are NOT deleted - only status is changed from 'active' to 'cleared'
+        # This preserves historical data for report generation. Cleared events remain in database.
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        now = datetime.now()
+        clear_time = now.strftime("%H:%M:%S")
+        clear_date = now.strftime("%Y-%m-%d")
+        
+        # Get all active events (ONLY events with status='active')
+        # Historical cleared events are NOT touched - they remain available for reports
+        cursor.execute('SELECT id, zone_name, wind_direction, activation_date, activation_time FROM emergency_events WHERE status = ?', ('active',))
+        active_events = cursor.fetchall()
+        
+        cleared_count = 0
+        for event in active_events:
+            event_id, zone_name, wind_direction, activation_date, activation_time = event
+            # Calculate duration
+            try:
+                activation_datetime = datetime.strptime(f"{activation_date} {activation_time}", "%Y-%m-%d %H:%M:%S")
+                clear_datetime = datetime.strptime(f"{clear_date} {clear_time}", "%Y-%m-%d %H:%M:%S")
+                duration = int((clear_datetime - activation_datetime).total_seconds() / 60)
+            except:
+                duration = 0
+            
+            # UPDATE status to 'cleared' - event is NOT deleted, preserved for reports
+            cursor.execute('''
+                UPDATE emergency_events 
+                SET clear_time = ?, duration_minutes = ?, status = 'cleared', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (clear_time, duration, event_id))
+            cleared_count += 1
+            logger.info(f"   ✅ Marked event {event_id} as cleared: {zone_name} {wind_direction} (preserved for reports)")
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"🧹 Marked {cleared_count} active emergency events as cleared (historical events preserved for reports)")
+        
+        # 3. Clear gateway service active zone
+        try:
+            gateway_service = get_gateway_service()
+            gateway_service.unregister_active_zone()
+            cleared = gateway_service.clear_command_queue()
+            logger.info(f"🧹 Cleared gateway service active zone and {cleared} queued commands")
+        except Exception as e:
+            logger.warning(f"⚠️  Error clearing gateway service: {e}")
+        
+        # 4. Broadcast zone_state cleared to all WebSocket clients
+        await websocket_manager.broadcast({
+            "type": "zone_state",
+            "status": "cleared",
+            "zone": None,
+            "windDirection": None,
+            "ts": int(datetime.now().timestamp() * 1000)
+        })
+        logger.info("📡 Broadcasted zone_state cleared to all WebSocket clients")
+        
+        return {
+            "success": True,
+            "message": "All active zones cleared",
+            "cleared_zones": cleared_zones,
+            "cleared_events": cleared_count,
+            "sync_state_cleared": True,
+            "gateway_cleared": True
+        }
+    except Exception as e:
+        logger.error(f"❌ Error clearing active zones: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error clearing active zones: {str(e)}")
+
+@app.get("/api/config")
+async def get_backend_config(request: Request):
+    """Get backend configuration including WebSocket URL
+    Allows frontend to dynamically detect backend IP/URL
+    """
+    try:
+        # Get the host from the request
+        # This handles cases where backend IP changes
+        host = request.headers.get("host", "").split(":")[0]  # Remove port if present
+        
+        # If host is empty or localhost, try to detect actual IP
+        if not host or host in ["localhost", "127.0.0.1"]:
+            # Try to detect actual network IP
+            import socket
+            try:
+                # Connect to external address to get local IP
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))  # Google DNS
+                host = s.getsockname()[0]
+                s.close()
+            except Exception:
+                # Fallback to request hostname
+                host = request.url.hostname or "localhost"
+        
+        # Determine protocol from request
+        protocol = "https" if request.url.scheme == "https" else "http"
+        ws_protocol = "wss" if protocol == "https" else "ws"
+        
+        # Backend port (default 8002)
+        backend_port = os.getenv("TSIM_BACKEND_PORT", "8002")
+        
+        # Construct URLs
+        api_url = f"{protocol}://{host}:{backend_port}/api"
+        ws_url = f"{ws_protocol}://{host}:{backend_port}/ws"
+        
+        logger.info(f"📡 Config endpoint: API={api_url}, WS={ws_url} (detected host={host})")
+        
+        return {
+            "api_url": api_url,
+            "ws_url": ws_url,
+            "host": host,
+            "port": int(backend_port),
+            "protocol": protocol
+        }
+    except Exception as e:
+        logger.error(f"Error getting backend config: {str(e)}")
+        # Return defaults on error
+        return {
+            "api_url": "http://localhost:8002/api",
+            "ws_url": "ws://localhost:8002/ws",
+            "host": "localhost",
+            "port": 8002,
+            "protocol": "http"
+        }
 
 # HTTP Sync endpoints for concurrent UI updates (tablets/screens)
 @app.get("/api/sync/state")
@@ -2565,14 +3199,106 @@ async def list_post_event_reports():
         logger.error(f"Error listing reports: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to list reports: {str(e)}")
 
+# WebSocket endpoint
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time updates - supports multiple concurrent connections"""
+    client_id = None
+    try:
+        # Accept connection first
+        await websocket.accept()
+        client_id = id(websocket)  # Use object ID as client identifier
+        logger.info(f"🔌 WebSocket connection accepted (client_id={client_id})")
+        
+        # Add to connection manager
+        await websocket_manager.connect(websocket)
+        logger.info(f"✅ WebSocket client {client_id} added to manager. Total connections: {len(websocket_manager.active_connections)}")
+        
+        # Send initial state sync on connection
+        # CRITICAL: Only send state if it's actually activated (not stale)
+        with _sync_lock:
+            sync_state = _sync_state.copy()
+            # Validate state: if activated but no zoneName, clear it (stale state)
+            if sync_state.get("isActivated") and not sync_state.get("zoneName"):
+                logger.warning("⚠️  Detected stale sync_state (activated but no zoneName) - clearing")
+                _sync_state["isActivated"] = False
+                _sync_state["zoneName"] = None
+                _sync_state["windDirection"] = None
+                _sync_state["activationTime"] = None
+                sync_state = _sync_state.copy()
+        
+        # Send initial state sync
+        try:
+            await websocket.send_json({
+                "type": "state_sync",
+                "data": {
+                    "isActivated": sync_state.get("isActivated", False),
+                    "zoneName": sync_state.get("zoneName"),
+                    "windDirection": sync_state.get("windDirection"),
+                    "activationTime": sync_state.get("activationTime"),
+                    "deactivationInProgress": sync_state.get("deactivationInProgress", False)
+                }
+            })
+            logger.info(f"📡 WebSocket {client_id}: Sent state_sync (isActivated={sync_state.get('isActivated', False)}, zone={sync_state.get('zoneName')})")
+        except Exception as e:
+            logger.error(f"❌ WebSocket {client_id}: Failed to send state_sync: {e}")
+            raise
+        
+        # Keep connection alive and handle incoming messages
+        # Use shorter timeout (30s) for faster detection of dead connections
+        while True:
+            try:
+                # Use receive_text with timeout to allow periodic health checks
+                # Reduced timeout to 30 seconds for faster dead connection detection
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                message = json.loads(data)
+                
+                # Handle ping
+                if message.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    logger.debug(f"🏓 WebSocket {client_id}: Responded to ping")
+                # Handle other client messages if needed
+                
+            except asyncio.TimeoutError:
+                # Timeout is normal - client should be sending pings
+                # Don't send ping from server, just continue waiting
+                # If connection is dead, next receive will fail
+                logger.debug(f"⏱️  WebSocket {client_id}: Receive timeout (waiting for client ping)")
+                continue
+            except WebSocketDisconnect:
+                logger.info(f"🔌 WebSocket {client_id}: Client disconnected normally")
+                break
+            except Exception as e:
+                # Check if it's a connection error
+                error_str = str(e).lower()
+                if 'connection' in error_str or 'closed' in error_str or 'broken' in error_str:
+                    logger.warning(f"⚠️  WebSocket {client_id}: Connection error - {e}")
+                else:
+                    logger.error(f"❌ WebSocket {client_id}: Error receiving message: {e}")
+                break
+                
+    except WebSocketDisconnect:
+        logger.info(f"🔌 WebSocket {client_id}: Client disconnected")
+    except Exception as e:
+        logger.error(f"❌ WebSocket {client_id}: Connection error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        # Always remove from connection manager
+        websocket_manager.disconnect(websocket)
+        logger.info(f"🧹 WebSocket {client_id}: Removed from manager. Remaining connections: {len(websocket_manager.active_connections)}")
+
 @app.get("/api/reports/event/{event_id}/data")
 async def get_event_data_for_report(event_id: int):
     """Get emergency event data and weather information for report generation"""
     try:
+        # Ensure table exists
+        _ensure_emergency_events_table()
+        
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Get emergency event
+        # Get emergency event (works for both active and cleared events)
         cursor.execute('''
             SELECT id, zone_name, wind_direction, activation_date, activation_time, 
                    clear_time, duration_minutes, status

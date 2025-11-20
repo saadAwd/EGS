@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { Toaster } from 'react-hot-toast';
 import apiClient from './api/client';
 import { unlockAudio } from './utils/audioUnlock';
 import EGSOperatorDashboard from './components/EGSOperatorDashboard';
@@ -9,11 +11,15 @@ import { ActivationProvider } from './contexts/ActivationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import { AlarmProvider } from './contexts/AlarmContext';
 import { SystemStateProvider, useSystemState } from './contexts/SystemStateContext';
+import { WebSocketProvider } from './contexts/WebSocketContext';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import ThemeSelector from './components/ThemeSelector';
 import AramcoLogo from './assets/Aramco-logo.png';
 import './themes.css';
 import ZoneActivation from './pages/ZoneActivation';
+import { queryClient } from './lib/queryClient';
+import StatusRibbon from './components/StatusRibbon';
+import ErrorBoundary from './components/ErrorBoundary';
 
 interface Device {
   id: number;
@@ -40,8 +46,8 @@ interface Route {
 
 const TABS = [
   { key: 'egs', label: '📊 EGS Dashboard' },
-  { key: 'traffic-lights', label: '🚦 Traffic Light Management' },
   { key: 'zone-activation', label: '🗺️ Zone Activation' },
+  { key: 'traffic-lights', label: '🚦 Traffic Light Management' },
   { key: 'system-events', label: '📋 System Events' },
   { key: 'generate-report', label: '📄 Generate Report' },
 ];
@@ -131,7 +137,7 @@ function EmergencyPortalTabs() {
                 key={t.key}
                 onClick={() => isAllowed && setTab(t.key as typeof tab)}
                 disabled={isDisabled}
-                className={`px-6 py-3 rounded-lg font-semibold transition-colors whitespace-nowrap ${
+                className={`px-6 py-3 rounded-lg font-semibold transition-colors whitespace-nowrap focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 ${
                   tab === t.key 
                     ? 'bg-blue-600 text-white' 
                     : isDisabled 
@@ -200,7 +206,7 @@ function EmergencyPortalTabs() {
   );
 }
 
-function App() {
+function AppContent() {
   const [audioUnlocked, setAudioUnlocked] = useState(false);
 
   // Unlock audio on first user interaction
@@ -221,25 +227,67 @@ function App() {
   }, []);
 
   return (
-    <ThemeProvider>
-      <ActivationProvider>
-        <SystemStateProvider>
-          <AlarmProvider>
-            {!audioUnlocked && (
-              <div className="fixed top-4 right-4 bg-yellow-500 text-black px-4 py-2 rounded-lg shadow-lg z-50">
-                <button onClick={() => unlockAudio().then(() => setAudioUnlocked(true))} className="font-bold">
-                  🔊 Enable Sound
-                </button>
-              </div>
-            )}
-            <Routes>
-              <Route path="/" element={<EmergencyPortalTabs />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </AlarmProvider>
-        </SystemStateProvider>
-      </ActivationProvider>
-    </ThemeProvider>
+    <>
+      <StatusRibbon />
+      {!audioUnlocked && (
+        <div className="fixed top-4 right-4 bg-yellow-500 text-black px-4 py-2 rounded-lg shadow-lg z-50">
+          <button 
+            onClick={() => unlockAudio().then(() => setAudioUnlocked(true))} 
+            className="font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-yellow-600"
+            aria-label="Enable sound for alarm notifications"
+          >
+            🔊 Enable Sound
+          </button>
+        </div>
+      )}
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/" element={<EmergencyPortalTabs />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </ErrorBoundary>
+    </>
+  );
+}
+
+function App() {
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <ActivationProvider>
+          <WebSocketProvider>
+            <SystemStateProvider>
+              <AlarmProvider>
+                <Toaster 
+                position="top-right"
+                toastOptions={{
+                  duration: 4000,
+                  style: {
+                    background: '#1f2937',
+                    color: '#fff',
+                  },
+                  success: {
+                    iconTheme: {
+                      primary: '#10b981',
+                      secondary: '#fff',
+                    },
+                  },
+                  error: {
+                    iconTheme: {
+                      primary: '#ef4444',
+                      secondary: '#fff',
+                    },
+                  },
+                }}
+              />
+                <AppContent />
+              </AlarmProvider>
+            </SystemStateProvider>
+          </WebSocketProvider>
+        </ActivationProvider>
+      </ThemeProvider>
+    </QueryClientProvider>
   );
 }
 

@@ -1,9 +1,12 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useActivationContext } from '../contexts/ActivationContext';
 import { useSystemState } from '../contexts/SystemStateContext';
 import apiClient from '../api/client';
-import { weatherApi, WeatherRecord } from '../api/weather';
 import { useAlarmContext } from '../contexts/AlarmContext';
+import { useDevices, useZones, useLamps, useGatewayStatus, useSensorData, useWeather, useBackendHealth } from '../api/queries';
+import { DashboardTileSkeleton } from './LoadingSkeleton';
+import { ErrorCard } from './ErrorCard';
 
 // Simple compass SVG card (snap to N/E/S/W only)
 const snapToCardinal = (deg: number) => {
@@ -112,21 +115,112 @@ interface Alert {
 
 
 const EGSOperatorDashboard: React.FC = () => {
+  const queryClient = useQueryClient();
   const { zoneActivation, setZoneActivation, clearZoneActivation } = useActivationContext();
   const { systemState, deactivateEmergency } = useSystemState();
   const { state: alarmState, play: startAlarm, stop: stopAlarm, acknowledge: suppressAlarm, resetSuppression } = useAlarmContext();
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [zones, setZones] = useState<Zone[]>([]);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [lamps, setLamps] = useState<any[]>([]);
-  const [gatewayStatus, setGatewayStatus] = useState<any>(null);
+  
+  // React Query hooks
+  const { data: devices = [], isLoading: devicesLoading, error: devicesError, refetch: refetchDevices } = useDevices();
+  const { data: zones = [], isLoading: zonesLoading, error: zonesError, refetch: refetchZones } = useZones();
+  const { data: lamps = [], isLoading: lampsLoading, error: lampsError, refetch: refetchLamps } = useLamps();
+  const { data: gatewayData, isLoading: gatewayLoading, error: gatewayError, refetch: refetchGateway } = useGatewayStatus();
+  const { data: sensorData = [], isLoading: sensorLoading, error: sensorError, refetch: refetchSensor } = useSensorData();
+  const { data: weather, isLoading: weatherLoading, error: weatherError, refetch: refetchWeather } = useWeather();
+  const { data: backendStatus = { connected: false, lastCheck: new Date() }, isLoading: healthLoading } = useBackendHealth();
+  
   const lastGatewayHeartbeatRef = React.useRef<number | null>(null);
   const lastGatewayStableStatusRef = React.useRef<'connected' | 'disconnected' | null>(null);
   const GATEWAY_ONLINE_GRACE_MS = 10000; // 10s grace to avoid flicker
-  const [backendStatus, setBackendStatus] = useState<{ connected: boolean; lastCheck: Date | null }>({ connected: false, lastCheck: null });
-  const [loading, setLoading] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<string>('');
-  const [weather, setWeather] = useState<WeatherRecord | null>(null);
+  
+  const loading = devicesLoading || zonesLoading || lampsLoading || gatewayLoading || sensorLoading || weatherLoading || healthLoading;
+  
+  // Stabilize gateway status to prevent online/offline flicker
+  const gatewayStatus = useMemo(() => {
+    if (!gatewayData) return null;
+    const gw = gatewayData;
+    const heartbeat = gw.last_heartbeat ? new Date(gw.last_heartbeat).getTime() : null;
+    if (heartbeat) {
+      lastGatewayHeartbeatRef.current = heartbeat;
+    }
+    const now = Date.now();
+    const withinGrace = lastGatewayHeartbeatRef.current != null && (now - lastGatewayHeartbeatRef.current) <= GATEWAY_ONLINE_GRACE_MS;
+    const reported = (gw.connection_status || gw.status || 'disconnected') as 'connected' | 'disconnected';
+    let stable: 'connected' | 'disconnected' = reported;
+    if (reported === 'disconnected' && withinGrace) {
+      stable = 'connected';
+    }
+    if (reported === 'disconnected' && !withinGrace && lastGatewayStableStatusRef.current === 'connected') {
+      stable = 'connected';
+    }
+    lastGatewayStableStatusRef.current = stable;
+    return { ...gw, connection_status: stable };
+  }, [gatewayData]);
+  
+  // Generate alerts from query data
+  const alerts = useMemo<Alert[]>(() => {
+    const realAlerts: Alert[] = [];
+    
+    // Gateway connection alert
+    if (gatewayStatus && gatewayStatus.status === 'disconnected') {
+      realAlerts.push({
+        id: 'gateway-1',
+        time: new Date().toLocaleTimeString(),
+        tag: 'ESP32 Gateway',
+        priority: 900,
+        type: 'Digital',
+        quality: 'Good',
+        isActive: true
+      });
+    }
+    
+    // Active zones alerts
+    if (zoneActivation.isActivated) {
+      realAlerts.push({
+        id: `zone-${zoneActivation.zoneName}`,
+        time: new Date().toLocaleTimeString(),
+        tag: `${zoneActivation.zoneName} Active`,
+        priority: 800,
+        type: 'Digital',
+        quality: 'Good',
+        isActive: true
+      });
+    }
+    
+    // Active lamps alerts
+    const activeLamps = lamps.filter((lamp: any) => lamp.is_on);
+    if (activeLamps.length > 0) {
+      realAlerts.push({
+        id: 'lamps-1',
+        time: new Date().toLocaleTimeString(),
+        tag: `${activeLamps.length} Lamps Active`,
+        priority: 700,
+        type: 'Digital',
+        quality: 'Good',
+        isActive: true
+      });
+    }
+    
+    // Sensor data alerts
+    if (sensorData.length > 0) {
+      const latestSensor = sensorData[0];
+      if (latestSensor.temperature_c && latestSensor.temperature_c > 40) {
+        realAlerts.push({
+          id: 'temp-1',
+          time: new Date().toLocaleTimeString(),
+          tag: 'High Temperature',
+          priority: 850,
+          type: 'HI',
+          quality: 'Good',
+          isActive: true
+        });
+      }
+    }
+    
+    return realAlerts;
+  }, [gatewayStatus, zoneActivation, lamps, sensorData]);
+  
+  const lastUpdate = useMemo(() => new Date().toLocaleTimeString(), [devices, zones, lamps, gatewayStatus, weather]);
 
   // Handle alarm based on emergency activation
   useEffect(() => {
@@ -178,145 +272,6 @@ const EGSOperatorDashboard: React.FC = () => {
     return FILENAME_TO_URL['All Zones.png'];
   }, [zoneActivation.isActivated, zoneActivation.zoneName, zoneActivation.windDirection]);
 
-  // Check backend health - defined before fetchData
-  const checkBackendHealth = useCallback(async () => {
-    try {
-      await apiClient.get('/health'); // Use health endpoint
-      setBackendStatus({ connected: true, lastCheck: new Date() });
-      return true;
-    } catch (error) {
-      setBackendStatus({ connected: false, lastCheck: new Date() });
-      return false;
-    }
-  }, []);
-
-  const fetchData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [devicesResponse, zonesResponse, lampsResponse, gatewayResponse, sensorResponse, weatherLatest] = await Promise.all([
-        apiClient.get('/devices/'),
-        apiClient.get('/zones/'),
-        apiClient.get('/lamps/'),
-        apiClient.get('/gateway/status').catch(() => ({ data: { status: 'disconnected' } })),
-        apiClient.get('/sensor-data/latest-with-signal/').catch(() => ({ data: [] })),
-        weatherApi.latest().catch(() => null),
-      ]);
-
-      // Check backend health
-      await checkBackendHealth();
-
-      // Filter devices for traffic lights TL1-TL14
-      const allDevices = devicesResponse.data.filter((device: Device) =>
-        device.name.startsWith('TL') && parseInt(device.name.substring(2)) <= 14
-      );
-
-      setDevices(allDevices);
-      setZones(zonesResponse.data);
-      setLamps(lampsResponse.data);
-
-      // Stabilize gateway status to prevent online/offline flicker
-      const gw = gatewayResponse.data || {};
-      const heartbeat = gw.last_heartbeat ? new Date(gw.last_heartbeat).getTime() : null;
-      if (heartbeat) {
-        lastGatewayHeartbeatRef.current = heartbeat;
-      }
-      const now = Date.now();
-      const withinGrace = lastGatewayHeartbeatRef.current != null && (now - lastGatewayHeartbeatRef.current) <= GATEWAY_ONLINE_GRACE_MS;
-      const reported = (gw.connection_status || gw.status || 'disconnected') as 'connected' | 'disconnected';
-      let stable: 'connected' | 'disconnected' = reported;
-      if (reported === 'disconnected' && withinGrace) {
-        // Keep showing connected during grace period after last heartbeat
-        stable = 'connected';
-      }
-      // Debounce: require two consecutive disconnected states outside grace window
-      if (reported === 'disconnected' && !withinGrace && lastGatewayStableStatusRef.current === 'connected') {
-        // Keep previous connected one more cycle
-        stable = 'connected';
-      }
-      lastGatewayStableStatusRef.current = stable;
-      setGatewayStatus({ ...gw, connection_status: stable });
-
-      // Generate real alerts based on system status
-      const realAlerts: Alert[] = [];
-      
-      // Gateway connection alert
-      if (gatewayResponse.data.status === 'disconnected') {
-        realAlerts.push({
-          id: 'gateway-1',
-          time: new Date().toLocaleTimeString(),
-          tag: 'ESP32 Gateway',
-          priority: 900,
-          type: 'Digital',
-          quality: 'Good',
-          isActive: true
-        });
-      }
-
-      // Active zones alerts (use frontend context)
-      if (zoneActivation.isActivated) {
-        realAlerts.push({
-          id: `zone-${zoneActivation.zoneName}`,
-          time: new Date().toLocaleTimeString(),
-          tag: `${zoneActivation.zoneName} Active`,
-          priority: 800,
-          type: 'Digital',
-          quality: 'Good',
-          isActive: true
-        });
-      }
-
-      // Active lamps alerts
-      const activeLamps = lampsResponse.data.filter((lamp: any) => lamp.is_on);
-      if (activeLamps.length > 0) {
-        realAlerts.push({
-          id: 'lamps-1',
-          time: new Date().toLocaleTimeString(),
-          tag: `${activeLamps.length} Lamps Active`,
-          priority: 700,
-          type: 'Digital',
-          quality: 'Good',
-          isActive: true
-        });
-      }
-
-      // Sensor data alerts
-      if (sensorResponse.data.length > 0) {
-        const latestSensor = sensorResponse.data[0];
-        if (latestSensor.temperature_c && latestSensor.temperature_c > 40) {
-          realAlerts.push({
-            id: 'temp-1',
-            time: new Date().toLocaleTimeString(),
-            tag: 'High Temperature',
-            priority: 850,
-            type: 'HI',
-            quality: 'Good',
-            isActive: true
-          });
-        }
-      }
-
-      setAlerts(realAlerts);
-      setWeather(weatherLatest);
-      setLastUpdate(new Date().toLocaleTimeString());
-    } catch (error) {
-      console.error('Error fetching dashboard data:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [checkBackendHealth]); // Include checkBackendHealth in dependencies
-
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
-
-  // Periodic backend health check (every 10 seconds)
-  useEffect(() => {
-    checkBackendHealth();
-    const healthInterval = setInterval(checkBackendHealth, 10000);
-    return () => clearInterval(healthInterval);
-  }, [checkBackendHealth]);
 
 
   // const getZoneStatus = (zoneId: number) => {
@@ -466,79 +421,113 @@ const EGSOperatorDashboard: React.FC = () => {
               </div>
             </div>
             <div className="grid grid-cols-3 gap-4 h-full">
-              <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-4 border border-gray-600 shadow-xl overflow-hidden relative">
-                <div className="absolute top-0 right-0 w-12 h-12 bg-green-400/10 rounded-full -mr-6 -mt-6"></div>
-                <div className="relative z-10">
-                  <div className="flex items-center mb-3">
-                    <div className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse"></div>
-                    <div className="text-sm font-semibold text-gray-200">Active Zones</div>
-                  </div>
-                  <div className="space-y-2 h-full overflow-y-auto">
-                    {(zoneActivation.isActivated || systemState.isEmergencyActive) ? (
-                      <div className="flex justify-between items-center p-3 bg-red-600 rounded-lg shadow-sm hover:bg-red-700 transition-colors">
-                        <span className="text-sm font-medium text-white">{zoneActivation.zoneName || systemState.activeZone}</span>
-                        <span className="text-xs text-white bg-red-500/30 px-2 py-1 rounded-full font-medium">
-                          {zoneActivation.windDirection || systemState.windDirection}
-                        </span>
+              {loading ? (
+                <>
+                  <DashboardTileSkeleton />
+                  <DashboardTileSkeleton />
+                  <DashboardTileSkeleton />
+                </>
+              ) : (
+                <>
+                  {zonesError ? (
+                    <ErrorCard 
+                      title="Failed to load zones"
+                      message={zonesError instanceof Error ? zonesError.message : 'Unable to fetch zone data'}
+                      onRetry={() => refetchZones()}
+                    />
+                  ) : (
+                    <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-4 border border-gray-600 shadow-xl overflow-hidden relative">
+                    <div className="absolute top-0 right-0 w-12 h-12 bg-green-400/10 rounded-full -mr-6 -mt-6"></div>
+                    <div className="relative z-10">
+                      <div className="flex items-center mb-3">
+                        <div className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse"></div>
+                        <div className="text-sm font-semibold text-gray-200">Active Zones</div>
                       </div>
-                    ) : (
-                      <div className="text-gray-400 text-sm p-4 bg-gray-700 rounded-lg text-center border border-gray-600">
-                        No active zones
+                      <div className="space-y-2 h-full overflow-y-auto">
+                        {(zoneActivation.isActivated || systemState.isEmergencyActive) ? (
+                          <div className="flex justify-between items-center p-3 bg-red-600 rounded-lg shadow-sm hover:bg-red-700 transition-colors">
+                            <span className="text-sm font-medium text-white">{zoneActivation.zoneName || systemState.activeZone}</span>
+                            <span className="text-xs text-white bg-red-500/30 px-2 py-1 rounded-full font-medium">
+                              {zoneActivation.windDirection || systemState.windDirection}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="text-gray-400 text-sm p-4 bg-gray-700 rounded-lg text-center border border-gray-600">
+                            No active zones
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-4 border border-gray-600 shadow-xl overflow-hidden relative">
-                <div className="absolute top-0 left-0 w-12 h-12 bg-blue-400/10 rounded-full -ml-6 -mt-6"></div>
-                <div className="relative z-10">
-                  <div className="flex items-center mb-3">
-                    <div className="w-2 h-2 bg-blue-400 rounded-full mr-2 animate-pulse"></div>
-                    <div className="text-sm font-semibold text-gray-200">Device Status</div>
-                  </div>
-                  <div className="space-y-2 h-full">
-                    <div className="flex justify-between items-center p-3 bg-gray-700 rounded-lg shadow-sm hover:bg-gray-600 transition-colors">
-                      <span className="text-sm text-gray-300">Active Devices:</span>
-                      <span className="text-lg font-bold text-green-400">{getActiveDevicesCount()}</span>
-                    </div>
-                    <div className="flex justify-between items-center p-3 bg-gray-700 rounded-lg shadow-sm hover:bg-gray-600 transition-colors">
-                      <span className="text-sm text-gray-300">Total Devices:</span>
-                      <span className="text-lg font-bold text-blue-400">{devices.length}</span>
-                    </div>
-                    <div className="flex justify-between items-center p-3 bg-gray-700 rounded-lg shadow-sm hover:bg-gray-600 transition-colors">
-                      <span className="text-sm text-gray-300">System Faults:</span>
-                      <span className="text-lg font-bold text-red-400">{getTotalFaults()}</span>
                     </div>
                   </div>
-                </div>
-              </div>
-              <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-4 border border-gray-600 shadow-xl overflow-hidden relative">
-                <div className="absolute bottom-0 right-0 w-12 h-12 bg-yellow-400/10 rounded-full -mr-6 -mb-6"></div>
-                <div className="relative z-10">
-                  <div className="flex items-center mb-3">
-                    <div className="w-2 h-2 bg-yellow-400 rounded-full mr-2 animate-pulse"></div>
-                    <div className="text-sm font-semibold text-gray-200">System Info</div>
+                  )}
+                  {devicesError ? (
+                    <ErrorCard 
+                      title="Failed to load devices"
+                      message={devicesError instanceof Error ? devicesError.message : 'Unable to fetch device data'}
+                      onRetry={() => refetchDevices()}
+                    />
+                  ) : (
+                    <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-4 border border-gray-600 shadow-xl overflow-hidden relative">
+                      <div className="absolute top-0 left-0 w-12 h-12 bg-blue-400/10 rounded-full -ml-6 -mt-6"></div>
+                      <div className="relative z-10">
+                        <div className="flex items-center mb-3">
+                          <div className="w-2 h-2 bg-blue-400 rounded-full mr-2 animate-pulse"></div>
+                          <div className="text-sm font-semibold text-gray-200">Device Status</div>
+                        </div>
+                        <div className="space-y-2 h-full">
+                          <div className="flex justify-between items-center p-3 bg-gray-700 rounded-lg shadow-sm hover:bg-gray-600 transition-colors">
+                            <span className="text-sm text-gray-300">Active Devices:</span>
+                            <span className="text-lg font-bold text-green-400">{getActiveDevicesCount()}</span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-gray-700 rounded-lg shadow-sm hover:bg-gray-600 transition-colors">
+                            <span className="text-sm text-gray-300">Total Devices:</span>
+                            <span className="text-lg font-bold text-blue-400">{devices.length}</span>
+                          </div>
+                          <div className="flex justify-between items-center p-3 bg-gray-700 rounded-lg shadow-sm hover:bg-gray-600 transition-colors">
+                            <span className="text-sm text-gray-300">System Faults:</span>
+                            <span className="text-lg font-bold text-red-400">{getTotalFaults()}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {weatherError ? (
+                    <ErrorCard 
+                      title="Failed to load weather"
+                      message={weatherError instanceof Error ? weatherError.message : 'Unable to fetch weather data'}
+                      onRetry={() => refetchWeather()}
+                    />
+                  ) : (
+                    <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-lg p-4 border border-gray-600 shadow-xl overflow-hidden relative">
+                    <div className="absolute bottom-0 right-0 w-12 h-12 bg-yellow-400/10 rounded-full -mr-6 -mb-6"></div>
+                    <div className="relative z-10">
+                      <div className="flex items-center mb-3">
+                        <div className="w-2 h-2 bg-yellow-400 rounded-full mr-2 animate-pulse"></div>
+                        <div className="text-sm font-semibold text-gray-200">System Info</div>
+                      </div>
+                      <div className="space-y-2 h-full">
+                        <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
+                          <div className="text-xs text-gray-400 mb-1">Last Update</div>
+                          <div className="text-sm font-medium text-white">{lastUpdate}</div>
+                        </div>
+                        <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
+                          <div className="text-xs text-gray-400 mb-1">Wind Direction</div>
+                          <div className="text-sm font-medium text-white">{weather?.wind_direction_deg != null ? `${Math.round(weather.wind_direction_deg)}°` : '—'}</div>
+                        </div>
+                        <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
+                          <div className="text-xs text-gray-400 mb-1">Active Zones</div>
+                          <div className="text-sm font-medium text-white">{zones.filter(z => z.is_active).length}</div>
+                        </div>
+                        <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
+                          <div className="text-xs text-gray-400 mb-1">System Status</div>
+                          <div className="text-sm font-medium text-green-400">Operational</div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div className="space-y-2 h-full">
-                    <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
-                      <div className="text-xs text-gray-400 mb-1">Last Update</div>
-                      <div className="text-sm font-medium text-white">{lastUpdate}</div>
-                    </div>
-                    <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
-                      <div className="text-xs text-gray-400 mb-1">Wind Direction</div>
-                      <div className="text-sm font-medium text-white">{weather?.wind_direction_deg != null ? `${Math.round(weather.wind_direction_deg)}°` : '—'}</div>
-                    </div>
-                    <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
-                      <div className="text-xs text-gray-400 mb-1">Active Zones</div>
-                      <div className="text-sm font-medium text-white">{zones.filter(z => z.is_active).length}</div>
-                    </div>
-                    <div className="p-3 bg-gray-700 rounded-lg shadow-sm border border-gray-600">
-                      <div className="text-xs text-gray-400 mb-1">System Status</div>
-                      <div className="text-sm font-medium text-green-400">Operational</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -623,7 +612,9 @@ const EGSOperatorDashboard: React.FC = () => {
                   <span className="text-sm">Normal: {alerts.filter(a => !a.isActive && a.priority <= 700).length}</span>
                 </div>
                 <button 
-                  onClick={fetchData}
+                  onClick={() => {
+                    queryClient.invalidateQueries();
+                  }}
                   disabled={loading}
                   className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-600"
                 >

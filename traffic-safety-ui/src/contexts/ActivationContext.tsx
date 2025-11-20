@@ -31,38 +31,28 @@ export const ActivationProvider: React.FC<ActivationProviderProps> = ({ children
     activationTime: null
   });
 
-  // Load zone activation from localStorage on mount
+  // REMOVED: localStorage persistence - backend is the source of truth
+  // Loading old state from localStorage can cause false activations
+  // WebSocket state_sync messages will update the UI state correctly
   useEffect(() => {
+    // Clear any old localStorage state to prevent false activations
     try {
-      const stored = localStorage.getItem('activeZoneMap');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed.activated && parsed.zoneName && parsed.windDirection) {
-          setZoneActivation({
-            zoneName: parsed.zoneName,
-            windDirection: parsed.windDirection,
-            isActivated: true,
-            activationTime: parsed.activationTime || new Date().toLocaleString()
-          });
-        }
-      }
+      localStorage.removeItem('activeZoneMap');
+      console.log('🧹 Cleared old localStorage state (backend is source of truth)');
     } catch (error) {
-      console.error('Failed to load zone activation from localStorage:', error);
+      console.error('Failed to clear localStorage:', error);
     }
   }, []);
 
   const clearZoneActivation = () => {
+    console.log('🧹 [ActivationContext] Clearing zone activation (UI state only)');
     setZoneActivation({
       zoneName: null,
       windDirection: '',
       isActivated: false,
       activationTime: null
     });
-    try {
-      localStorage.removeItem('activeZoneMap');
-    } catch (error) {
-      console.error('Failed to clear zone activation from localStorage:', error);
-    }
+    // REMOVED: localStorage persistence - backend is the source of truth
   };
 
   return (

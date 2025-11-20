@@ -1,56 +1,51 @@
 import React, { useState, useEffect } from 'react';
-import { Pole, Lamp, getPoles, getAllLamps } from '../../api/trafficLights';
-import { getGatewayStatus, connectGateway, disconnectGateway, updateLampGatewayMapping, GatewayStatus } from '../../api/gateway';
+import { useQueryClient } from '@tanstack/react-query';
+import { Pole, Lamp } from '../../api/trafficLights';
+import { connectGateway, disconnectGateway, updateLampGatewayMapping, GatewayStatus } from '../../api/gateway';
+import { usePoles, useLamps, useGatewayStatus } from '../../api/queries';
+import { useSystemState } from '../../contexts/SystemStateContext';
+import { getZoneLampIds } from '../../utils/zoneLamps';
 import PoleControl from './PoleControl';
 import { Search, Filter, RefreshCw, Zap, ZapOff, Wifi, WifiOff, Settings, AlertCircle } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 const TrafficLightDashboard: React.FC = () => {
-  const [poles, setPoles] = useState<Pole[]>([]);
-  const [lamps, setLamps] = useState<Lamp[]>([]);
+  const queryClient = useQueryClient();
+  const { systemState } = useSystemState();
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'inactive'>('all');
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
-  const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
 
-  const fetchData = async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-      
-      const [polesData, lampsData, gatewayData] = await Promise.all([
-        getPoles(),
-        getAllLamps(),
-        getGatewayStatus().catch(() => null)
-      ]);
-      
-      setPoles(polesData);
-      setLamps(lampsData);
-      setGatewayStatus(gatewayData);
-      setLastUpdated(new Date());
-    } catch (err) {
-      setError('Failed to load traffic light data');
-      console.error('Error fetching data:', err);
-    } finally {
-      setIsLoading(false);
+  // React Query hooks
+  const { data: poles = [], isLoading: polesLoading, error: polesError } = usePoles();
+  const { data: lamps = [], isLoading: lampsLoading, error: lampsError } = useLamps();
+  const { data: gatewayStatus, isLoading: gatewayLoading, error: gatewayStatusError } = useGatewayStatus();
+  
+  const isLoading = polesLoading || lampsLoading || gatewayLoading;
+  const error = polesError || lampsError || gatewayStatusError ? 'Failed to load traffic light data' : null;
+  const lastUpdated = new Date();
+  
+  // Get lamp IDs that are in the active zone (for deactivation lock)
+  const activeZoneLampIds = React.useMemo(() => {
+    if (systemState.deactivationInProgress && systemState.activeZone && systemState.windDirection) {
+      return getZoneLampIds(systemState.activeZone, systemState.windDirection);
     }
-  };
+    return [];
+  }, [systemState.deactivationInProgress, systemState.activeZone, systemState.windDirection]);
 
   const handleGatewayConnect = async () => {
     try {
       setIsConnecting(true);
       setGatewayError(null);
       
-      // Initiate backend connect; ignore response shape and then read health
       await connectGateway();
-      const health = await getGatewayStatus();
-      setGatewayStatus(health);
-      await fetchData(); // Refresh data
+      // Invalidate gateway status query to refetch
+      queryClient.invalidateQueries({ queryKey: ['gateway', 'status'] });
+      toast.success('Gateway connected successfully');
     } catch (err) {
       setGatewayError('Failed to connect to gateway');
+      toast.error('Failed to connect to gateway');
       console.error('Gateway connection error:', err);
     } finally {
       setIsConnecting(false);
@@ -60,9 +55,10 @@ const TrafficLightDashboard: React.FC = () => {
   const handleGatewayDisconnect = async () => {
     try {
       await disconnectGateway();
-      setGatewayStatus(null);
-      await fetchData(); // Refresh data
+      queryClient.invalidateQueries({ queryKey: ['gateway', 'status'] });
+      toast.success('Gateway disconnected');
     } catch (err) {
+      toast.error('Failed to disconnect gateway');
       console.error('Gateway disconnect error:', err);
     }
   };
@@ -70,25 +66,17 @@ const TrafficLightDashboard: React.FC = () => {
   const handleUpdateMapping = async () => {
     try {
       await updateLampGatewayMapping();
-      await fetchData();
-      alert('Lamp mapping update requested.');
+      queryClient.invalidateQueries({ queryKey: ['lamps'] });
+      toast.success('Lamp mapping update requested');
     } catch (err) {
-      alert('Failed to update lamp mapping');
+      toast.error('Failed to update lamp mapping');
       console.error('Mapping update error:', err);
     }
   };
 
-  useEffect(() => {
-    fetchData();
-  }, []);
-
-  const handleLampUpdate = (updatedLamps: Lamp[]) => {
-    setLamps(prevLamps => 
-      prevLamps.map(lamp => {
-        const updatedLamp = updatedLamps.find(ul => ul.id === lamp.id);
-        return updatedLamp || lamp;
-      })
-    );
+  const handleLampUpdate = () => {
+    // Invalidate lamps query to refetch
+    queryClient.invalidateQueries({ queryKey: ['lamps'] });
   };
 
   const filteredPoles = poles.filter(pole => {
@@ -157,9 +145,12 @@ const TrafficLightDashboard: React.FC = () => {
           
           <div className="flex items-center space-x-3">
             <button
-              onClick={fetchData}
+              onClick={() => {
+                queryClient.invalidateQueries();
+              }}
               disabled={isLoading}
-              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+              aria-label="Refresh traffic light data"
+              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
             >
               <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
               <span>Refresh</span>
@@ -278,7 +269,8 @@ const TrafficLightDashboard: React.FC = () => {
              <button
                onClick={handleGatewayConnect}
               disabled={isConnecting || gatewayStatus?.connection_status === 'connected'}
-               className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors disabled:opacity-50"
+              aria-label="Connect to ESP32 gateway"
+               className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-500"
              >
                <Wifi className="w-4 h-4" />
                <span>{isConnecting ? 'Connecting...' : 'Connect Gateway'}</span>
@@ -287,7 +279,8 @@ const TrafficLightDashboard: React.FC = () => {
             <button
               onClick={handleGatewayDisconnect}
               disabled={gatewayStatus?.connection_status !== 'connected'}
-              className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50"
+              aria-label="Disconnect from ESP32 gateway"
+              className="flex items-center space-x-2 px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
             >
               <WifiOff className="w-4 h-4" />
               <span>Disconnect</span>
@@ -295,7 +288,8 @@ const TrafficLightDashboard: React.FC = () => {
             
             <button
               onClick={handleUpdateMapping}
-              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              aria-label="Update lamp to gateway mapping"
+              className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
             >
               <Settings className="w-4 h-4" />
               <span>Update Mapping</span>
@@ -314,7 +308,7 @@ const TrafficLightDashboard: React.FC = () => {
                 placeholder="Search poles..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="pl-10 pr-4 py-2 border border-gray-300 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:border-transparent"
               />
             </div>
             
@@ -324,7 +318,7 @@ const TrafficLightDashboard: React.FC = () => {
               <select
                 value={filterStatus}
                 onChange={(e) => setFilterStatus(e.target.value as 'all' | 'active' | 'inactive')}
-                className="pl-10 pr-8 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="pl-10 pr-8 py-2 border border-gray-300 rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:border-transparent"
               >
                 <option value="all">All Status</option>
                 <option value="active">Active Only</option>
@@ -338,14 +332,16 @@ const TrafficLightDashboard: React.FC = () => {
             <button
               onClick={() => handleBulkOperation('activate')}
               disabled={isLoading}
-              className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors disabled:opacity-50"
+              aria-label="Turn on all lamps in all poles"
+              className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-500"
             >
               Activate All
             </button>
             <button
               onClick={() => handleBulkOperation('deactivate')}
               disabled={isLoading}
-              className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50"
+              aria-label="Turn off all lamps in all poles"
+              className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
             >
               Deactivate All
             </button>
@@ -365,11 +361,13 @@ const TrafficLightDashboard: React.FC = () => {
         {filteredPoles.map((pole) => {
           const poleLamps = lamps.filter(lamp => lamp.pole_id === pole.id);
           return (
-            <PoleControl
+              <PoleControl
               key={pole.id}
               pole={pole}
               lamps={poleLamps}
-              onLampUpdate={(updatedLamps) => handleLampUpdate(updatedLamps)}
+              onLampUpdate={handleLampUpdate}
+              deactivationInProgress={systemState.deactivationInProgress}
+              disabledLampIds={activeZoneLampIds}
             />
           );
         })}

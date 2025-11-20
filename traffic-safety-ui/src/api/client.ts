@@ -1,21 +1,5 @@
 import axios from 'axios';
-
-// Resolve backend URL with optional env override to avoid using ESP32 AP IP
-const getBackendUrl = () => {
-  // Highest priority: explicit env override
-  const override = (import.meta as any)?.env?.VITE_API_BASE_URL as string | undefined;
-  if (override && override.trim().length > 0) {
-    return override.trim();
-  }
-
-  // Default behaviors
-  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-    return 'http://localhost:8002/api';
-  }
-
-  // Fallback: same host as page (works when UI and backend are on same machine)
-  return `http://${window.location.hostname}:8002/api`;
-};
+import { getBackendUrl } from '../utils/backendConfig';
 
 // Create axios instance with base configuration
 const apiClient = axios.create({

@@ -1,30 +1,55 @@
-import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import apiClient from '../api/client';
-import { weatherApi, WeatherRecord } from '../api/weather';
 import { useActivationContext } from '../contexts/ActivationContext';
 import { useAlarmContext } from '../contexts/AlarmContext';
 import { useSystemState } from '../contexts/SystemStateContext';
+import { useWebSocketContext } from '../contexts/WebSocketContext';
+import { CommandStatusMessage } from '../utils/websocketClient';
+import { useWeather } from '../api/queries';
+import { useActivateZone, useDeactivateZone } from '../api/mutations';
+import { getZoneLampIds } from '../utils/zoneLamps';
+import toast from 'react-hot-toast';
 
 type WindDir = '' | 'N-S' | 'S-N' | 'E-W' | 'W-E';
 
 // Discover zone images from src/assets using Vite's glob import
-// Use lazy loading to avoid blocking build with large images
-const imageModules = import.meta.glob('../assets/*.png', { eager: false, query: '?url', import: 'default' }) as Record<string, () => Promise<string>>;
+// Support both WebP (preferred) and PNG (fallback)
+const imageModulesPNG = import.meta.glob('../assets/*.png', { eager: false, query: '?url', import: 'default' }) as Record<string, () => Promise<string>>;
+const imageModulesWebP = import.meta.glob('../assets/*.webp', { eager: false, query: '?url', import: 'default' }) as Record<string, () => Promise<string>>;
 
-// Build a mapping from filename (e.g., 'Zone A.png') to URL loader function
-// For build-time, we'll use a synchronous approach with eager loading only for known files
-const FILENAME_TO_URL: Record<string, string> = {};
-const imageModulesEager = import.meta.glob('../assets/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
-Object.entries(imageModulesEager).forEach(([path, url]) => {
+// Build mappings from filename to URL (WebP preferred, PNG fallback)
+const FILENAME_TO_URL_WEBP: Record<string, string> = {};
+const FILENAME_TO_URL_PNG: Record<string, string> = {};
+
+// Eager load for immediate access
+const imageModulesWebPEager = import.meta.glob('../assets/*.webp', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
+const imageModulesPNGEager = import.meta.glob('../assets/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
+
+Object.entries(imageModulesWebPEager).forEach(([path, url]) => {
   const parts = path.split('/');
-  const filename = parts[parts.length - 1];
-  FILENAME_TO_URL[filename] = url as string;
+  const filename = parts[parts.length - 1].replace('.webp', '');
+  FILENAME_TO_URL_WEBP[filename] = url as string;
 });
 
-// Extract known zone names from discovered files (exclude 'All Zones.png')
-const KNOWN_ZONES: string[] = Object.keys(FILENAME_TO_URL)
-  .filter(name => name.toLowerCase().startsWith('zone ') && name.toLowerCase().endsWith('.png'))
-  .map(name => name.replace(/\.png$/i, ''))
+Object.entries(imageModulesPNGEager).forEach(([path, url]) => {
+  const parts = path.split('/');
+  const filename = parts[parts.length - 1].replace('.png', '');
+  FILENAME_TO_URL_PNG[filename] = url as string;
+});
+
+// Helper function to get image URL (WebP with PNG fallback)
+const getImageUrl = (filename: string): string => {
+  const baseName = filename.replace(/\.(png|webp)$/i, '');
+  return FILENAME_TO_URL_WEBP[baseName] || FILENAME_TO_URL_PNG[baseName] || '';
+};
+
+// Extract known zone names from discovered files (exclude 'All Zones')
+const KNOWN_ZONES: string[] = [
+  ...Object.keys(FILENAME_TO_URL_WEBP),
+  ...Object.keys(FILENAME_TO_URL_PNG)
+]
+  .filter(name => name.toLowerCase().startsWith('zone ') && name.toLowerCase() !== 'all zones')
+  .filter((value, index, self) => self.indexOf(value) === index) // Remove duplicates
   .sort();
 
 const ZoneActivation: React.FC = () => {
@@ -32,11 +57,97 @@ const ZoneActivation: React.FC = () => {
   const { state: alarmState, play: startAlarm, stop: stopAlarm, acknowledge: suppressAlarm, resetSuppression } = useAlarmContext();
   const { systemState, activateEmergency, deactivateEmergency } = useSystemState();
   const [selectedZoneName, setSelectedZoneName] = useState<string | null>(null);
-  const [weather, setWeather] = useState<WeatherRecord | null>(null);
   const [autoWindDirection, setAutoWindDirection] = useState<WindDir>('');
   const [manualWindDirection, setManualWindDirection] = useState<WindDir>('');
   const [isManualMode, setIsManualMode] = useState<boolean>(false);
-  const [weatherConnectionFailed, setWeatherConnectionFailed] = useState<boolean>(false);
+  const [uiLock, setUiLock] = useState<boolean>(false);
+  const { wsClient } = useWebSocketContext();
+  
+  // Deactivation progress tracking
+  const [deactivationProgress, setDeactivationProgress] = useState<{
+    stage: 'idle' | 'queuing' | 'sending' | 'ack' | 'done';
+    totalLamps: number;
+    ackedLamps: number;
+    failedLamps: number;
+  }>({
+    stage: 'idle',
+    totalLamps: 0,
+    ackedLamps: 0,
+    failedLamps: 0
+  });
+  
+  // React Query hooks
+  const { data: weather, isLoading: weatherLoading, isError: weatherError } = useWeather();
+  const activateZoneMutation = useActivateZone();
+  const deactivateZoneMutation = useDeactivateZone();
+  
+  const weatherConnectionFailed = weatherError || false;
+  
+  // Subscribe to WebSocket command_status for deactivation progress
+  useEffect(() => {
+    if (!wsClient || !systemState.deactivationInProgress) return;
+    
+    const activeZoneLampIds = systemState.activeZone && systemState.windDirection
+      ? getZoneLampIds(systemState.activeZone, systemState.windDirection)
+      : [];
+    
+    if (activeZoneLampIds.length === 0) return;
+    
+    // Initialize progress tracking
+    setDeactivationProgress({
+      stage: 'queuing',
+      totalLamps: activeZoneLampIds.length,
+      ackedLamps: 0,
+      failedLamps: 0
+    });
+    
+    const handleCommandStatus = (message: CommandStatusMessage) => {
+      if (message.scope === 'zone' || (message.scope === 'lamp' && message.device_id && activeZoneLampIds.includes(message.device_id))) {
+        setDeactivationProgress(prev => {
+          if (message.state === 'queued' || message.state === 'sent') {
+            return {
+              ...prev,
+              stage: message.state === 'queued' ? 'queuing' : 'sending'
+            };
+          } else if (message.state === 'ack') {
+            const newAcked = prev.ackedLamps + 1;
+            const newStage = newAcked >= prev.totalLamps ? 'done' : 'ack';
+            return {
+              ...prev,
+              stage: newStage,
+              ackedLamps: newAcked
+            };
+          } else if (message.state === 'failed') {
+            return {
+              ...prev,
+              failedLamps: prev.failedLamps + 1
+            };
+          }
+          return prev;
+        });
+      }
+    };
+    
+    wsClient.onMessage('command_status', handleCommandStatus);
+    
+    return () => {
+      // Cleanup handled by WebSocket client
+    };
+  }, [wsClient, systemState.deactivationInProgress, systemState.activeZone, systemState.windDirection]);
+  
+  // Reset progress when deactivation completes
+  useEffect(() => {
+    if (!systemState.isEmergencyActive && deactivationProgress.stage === 'done') {
+      setTimeout(() => {
+        setDeactivationProgress({
+          stage: 'idle',
+          totalLamps: 0,
+          ackedLamps: 0,
+          failedLamps: 0
+        });
+      }, 2000);
+    }
+  }, [systemState.isEmergencyActive, deactivationProgress.stage]);
 
   // Convert wind direction degrees to cardinal directions
   const degToWindDir = (deg: number | null): WindDir => {
@@ -49,31 +160,16 @@ const ZoneActivation: React.FC = () => {
     return '';
   };
 
-  // Fetch latest weather data
+  // Update wind direction from weather data
   useEffect(() => {
-    const fetchWeather = async () => {
-      try {
-        const latest = await weatherApi.latest();
-        setWeather(latest);
-        setWeatherConnectionFailed(false);
-        // Only update wind direction if not activated (locked) and in auto mode
-        if (!zoneActivation.isActivated && !isManualMode && latest?.wind_direction_deg != null) {
-          setAutoWindDirection(degToWindDir(latest.wind_direction_deg));
-        }
-      } catch (error) {
-        console.error('Failed to fetch weather data:', error);
-        setWeatherConnectionFailed(true);
-        // Auto-switch to manual mode if weather connection fails
-        if (!zoneActivation.isActivated) {
-          setIsManualMode(true);
-        }
-      }
-    };
-
-    fetchWeather();
-    const interval = setInterval(fetchWeather, 10000); // Update every 10 seconds
-    return () => clearInterval(interval);
-  }, [zoneActivation.isActivated, isManualMode]);
+    if (!zoneActivation.isActivated && !isManualMode && weather?.wind_direction_deg != null) {
+      setAutoWindDirection(degToWindDir(weather.wind_direction_deg));
+    }
+    // Auto-switch to manual mode if weather connection fails
+    if (weatherError && !zoneActivation.isActivated) {
+      setIsManualMode(true);
+    }
+  }, [weather, weatherError, zoneActivation.isActivated, isManualMode]);
 
   // Initialize wind direction from context if activated
   useEffect(() => {
@@ -124,50 +220,181 @@ const ZoneActivation: React.FC = () => {
 
   const imageSrc = useMemo(() => {
     if (zoneActivation.isActivated && zoneActivation.zoneName && zoneActivation.windDirection) {
-      // Try scenario-specific image first: "Zone A N-S.png"
-      const scenarioFilename = `${zoneActivation.zoneName} ${zoneActivation.windDirection}.png`;
-      if (FILENAME_TO_URL[scenarioFilename]) {
-        return FILENAME_TO_URL[scenarioFilename];
+      // Try scenario-specific image first: "Zone A N-S" (WebP preferred, PNG fallback)
+      const scenarioBaseName = `${zoneActivation.zoneName} ${zoneActivation.windDirection}`;
+      const scenarioUrl = getImageUrl(scenarioBaseName);
+      if (scenarioUrl) {
+        return scenarioUrl;
       }
-      // Fallback to general zone image: "Zone A.png"
-      const zoneFilename = `${zoneActivation.zoneName}.png`;
-      if (FILENAME_TO_URL[zoneFilename]) {
-        return FILENAME_TO_URL[zoneFilename];
+      // Fallback to general zone image: "Zone A" (WebP preferred, PNG fallback)
+      const zoneUrl = getImageUrl(zoneActivation.zoneName);
+      if (zoneUrl) {
+        return zoneUrl;
       }
     }
-    // Default to "All Zones.png"
-    return FILENAME_TO_URL['All Zones.png'];
+    // Default to "All Zones" (WebP preferred, PNG fallback)
+    return getImageUrl('All Zones') || '';
   }, [zoneActivation.isActivated, zoneActivation.zoneName, zoneActivation.windDirection]);
+
+  // Image preloading based on wind direction prediction
+  useEffect(() => {
+    if (!weather || weatherConnectionFailed) return;
+    
+    // Predict likely wind directions based on current wind
+    const currentWind = weather.wind_direction_deg;
+    if (currentWind == null) return;
+    
+    // Get current wind direction
+    const currentDir = degToWindDir(currentWind);
+    if (!currentDir) return;
+    
+    // Preload images for current zone selection and likely wind directions
+    const zonesToPreload = selectedZoneName ? [selectedZoneName] : KNOWN_ZONES.slice(0, 3); // Preload top 3 zones if none selected
+    const windDirs: WindDir[] = ['N-S', 'S-N', 'E-W', 'W-E'];
+    
+    zonesToPreload.forEach(zone => {
+      // Preload current wind direction first
+      const currentWindImage = getImageUrl(`${zone} ${currentDir}`);
+      if (currentWindImage) {
+        const img = new Image();
+        img.src = currentWindImage;
+      }
+      
+      // Preload other wind directions (lower priority)
+      windDirs.forEach(windDir => {
+        if (windDir !== currentDir) {
+          const imageUrl = getImageUrl(`${zone} ${windDir}`);
+          if (imageUrl) {
+            const img = new Image();
+            img.src = imageUrl;
+          }
+        }
+      });
+      
+      // Preload base zone image
+      const baseImageUrl = getImageUrl(zone);
+      if (baseImageUrl) {
+        const img = new Image();
+        img.src = baseImageUrl;
+      }
+    });
+    
+    // Preload "All Zones" image
+    const allZonesUrl = getImageUrl('All Zones');
+    if (allZonesUrl) {
+      const img = new Image();
+      img.src = allZonesUrl;
+    }
+  }, [weather, weatherConnectionFailed, selectedZoneName]);
 
   // STATELESS: No localStorage - SystemStateContext is the only source of truth
 
   // Deactivate handler - STATELESS: only sends command to backend, SystemStateContext will update
   const handleDeactivate = useCallback(async () => {
+    setUiLock(true);
     try {
       console.log('Starting deactivation process...');
-      
-      // Step 1: Send deactivation command to backend (ONLY action - no local state changes)
-      await apiClient.post('/zones/deactivate', {});
-      console.log('Deactivation command sent to backend');
-      
-      // Step 2: Wait for backend to process and send commands to gateway
+      await deactivateZoneMutation.mutateAsync();
+      // Wait for backend to process
       await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      // Step 3: Refresh lamp states to reflect OFF state
-      try {
-        await apiClient.get('/lamps/');
-        console.log('Lamp states refreshed');
-      } catch (err) {
-        console.error('Failed to refresh lamp states:', err);
-      }
-      
-      // SystemStateContext will poll and update state automatically
       console.log('Deactivation complete - SystemStateContext will update state');
     } catch (err) {
       console.error('Deactivation failed:', err);
-      // Don't restore state - let SystemStateContext handle it via polling
+    } finally {
+      // Keep UI lock until state confirms activeZone=null
+      // This will be handled by the useEffect below
     }
-  }, []);
+  }, [deactivateZoneMutation]);
+  
+  // Unlock UI when deactivation is confirmed
+  useEffect(() => {
+    if (uiLock && !systemState.isEmergencyActive && systemState.activeZone === null) {
+      setUiLock(false);
+    }
+  }, [uiLock, systemState.isEmergencyActive, systemState.activeZone]);
+
+  // Keyboard shortcuts: Alt+Shift+A (activate), Alt+Shift+D (deactivate)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Alt+Shift+A: Activate emergency
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        
+        // Check if activation is possible
+        if (systemState.isEmergencyActive) {
+          toast.error('Emergency is already active');
+          return;
+        }
+        
+        const activeWindDirection = isManualMode ? manualWindDirection : autoWindDirection;
+        if (!selectedZoneName || !activeWindDirection) {
+          toast.error('Please select a zone and ensure wind direction is available');
+          return;
+        }
+        
+        if (uiLock || activateZoneMutation.isPending) {
+          toast.error('Operation in progress, please wait');
+          return;
+        }
+        
+        // Show confirmation dialog
+        const confirmed = window.confirm(
+          `Activate emergency for Zone ${selectedZoneName} with wind direction ${activeWindDirection}?`
+        );
+        
+        if (confirmed) {
+          activateZoneMutation.mutateAsync({ 
+            zoneName: selectedZoneName, 
+            windDirection: activeWindDirection 
+          }).catch((err) => {
+            console.error('Activation failed:', err);
+          });
+        }
+      }
+      
+      // Alt+Shift+D: Deactivate emergency
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        
+        // Check if deactivation is possible
+        if (!systemState.isEmergencyActive) {
+          toast.error('No active emergency to deactivate');
+          return;
+        }
+        
+        if (uiLock || deactivateZoneMutation.isPending || systemState.deactivationInProgress) {
+          toast.error('Deactivation already in progress');
+          return;
+        }
+        
+        // Show confirmation dialog
+        const confirmed = window.confirm(
+          `Deactivate emergency for Zone ${systemState.activeZone || 'current zone'}?`
+        );
+        
+        if (confirmed) {
+          handleDeactivate();
+        }
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [
+    systemState.isEmergencyActive,
+    systemState.activeZone,
+    systemState.deactivationInProgress,
+    selectedZoneName,
+    isManualMode,
+    manualWindDirection,
+    autoWindDirection,
+    uiLock,
+    activateZoneMutation,
+    deactivateZoneMutation,
+    handleDeactivate
+  ]);
 
   // Emergency activated view - full screen with zone image and alarm banner only
   if (zoneActivation.isActivated || systemState.isEmergencyActive) {
@@ -195,6 +422,7 @@ const ZoneActivation: React.FC = () => {
               {alarmState.isPlaying && !alarmState.suppressed && (
                 <button
                   onClick={() => suppressAlarm(120000)}
+                  aria-label="Acknowledge alarm and suppress for 2 minutes"
                   className="px-3 py-1 bg-yellow-600 hover:bg-yellow-700 text-white rounded-md font-semibold transition-colors text-xs"
                 >
                   🔕 Acknowledge
@@ -202,23 +430,63 @@ const ZoneActivation: React.FC = () => {
               )}
               <button
                 onClick={handleDeactivate}
-                className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded-md font-semibold transition-colors text-xs"
+                disabled={uiLock || deactivateZoneMutation.isPending || systemState.deactivationInProgress}
+                aria-label="Deactivate emergency zone"
+                className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded-md font-semibold transition-colors text-xs disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Deactivate
+                {deactivateZoneMutation.isPending || systemState.deactivationInProgress ? 'Deactivating...' : 'Deactivate'}
               </button>
             </div>
           </div>
+          
+          {/* Deactivation Progress Strip */}
+          {systemState.deactivationInProgress && deactivationProgress.stage !== 'idle' && (
+            <div className="mt-2 pt-2 border-t border-red-500">
+              <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center space-x-2">
+                  <span className="font-semibold">Deactivation Progress:</span>
+                  <span className={`${
+                    deactivationProgress.stage === 'queuing' ? 'text-yellow-200' :
+                    deactivationProgress.stage === 'sending' ? 'text-blue-200' :
+                    deactivationProgress.stage === 'ack' ? 'text-green-200' :
+                    'text-white'
+                  }`}>
+                    {deactivationProgress.stage === 'queuing' && 'Queuing OFF commands...'}
+                    {deactivationProgress.stage === 'sending' && 'Sending commands...'}
+                    {deactivationProgress.stage === 'ack' && `ACK ${deactivationProgress.ackedLamps}/${deactivationProgress.totalLamps}`}
+                    {deactivationProgress.stage === 'done' && 'Clearing state...'}
+                  </span>
+                </div>
+                {deactivationProgress.totalLamps > 0 && (
+                  <div className="flex items-center space-x-2">
+                    <div className="w-32 h-2 bg-red-800 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-green-400 transition-all duration-300"
+                        style={{ width: `${(deactivationProgress.ackedLamps / deactivationProgress.totalLamps) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-xs opacity-75">
+                      {deactivationProgress.ackedLamps}/{deactivationProgress.totalLamps}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Zone Image - Full remaining space, maximally stretched with minimal padding */}
         <div className="bg-gray-800 rounded-lg overflow-hidden border border-gray-700 flex-1" style={{ minHeight: 0, padding: '0.1rem' }}>
-          <img
-            src={imageSrc}
-            alt={zoneActivation.zoneName || systemState.activeZone || 'Active Zone'}
-            className="w-full h-full"
-            style={{ display: 'block', objectFit: 'fill', width: '100%', height: '100%' }}
-            loading="eager"
-          />
+          <picture>
+            <source srcSet={imageSrc} type="image/webp" />
+            <img
+              src={imageSrc.includes('.webp') ? imageSrc.replace('.webp', '.png') : imageSrc}
+              alt={zoneActivation.zoneName || systemState.activeZone || 'Active Zone'}
+              className="w-full h-full"
+              style={{ display: 'block', objectFit: 'fill', width: '100%', height: '100%' }}
+              loading="eager"
+            />
+          </picture>
         </div>
       </div>
     );
@@ -262,7 +530,7 @@ const ZoneActivation: React.FC = () => {
                   type="checkbox"
                   checked={isManualMode}
                   onChange={(e) => setIsManualMode(e.target.checked)}
-                  className="mr-2"
+                  className="mr-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
                   disabled={weatherConnectionFailed}
                 />
                 Manual Wind
@@ -287,6 +555,7 @@ const ZoneActivation: React.FC = () => {
                 <button
                   key={dir}
                   onClick={() => setManualWindDirection(dir)}
+                  aria-label={`Select wind direction ${dir}`}
                   className={`px-4 py-2 rounded-md font-semibold transition-colors ${
                     manualWindDirection === dir
                       ? 'bg-blue-600 text-white'
@@ -306,11 +575,14 @@ const ZoneActivation: React.FC = () => {
         <div className="rounded-lg overflow-hidden border border-gray-700 bg-gray-900 mx-auto" style={{ maxWidth: 1000 }}>
           <div className="relative w-full" style={{ paddingTop: '56.25%' }}>
             {/* 16:9 container to keep overlays in correct positions */}
-            <img
-              src={imageSrc}
-              alt={selectedZoneName || 'All Zones'}
-              className="absolute inset-0 h-full w-full object-contain"
-            />
+            <picture>
+              <source srcSet={imageSrc} type="image/webp" />
+              <img
+                src={imageSrc.includes('.webp') ? imageSrc.replace('.webp', '.png') : imageSrc}
+                alt={selectedZoneName || 'All Zones'}
+                className="absolute inset-0 h-full w-full object-contain"
+              />
+            </picture>
             {KNOWN_ZONES.filter(name => HOTSPOTS[name]).map(name => {
               const r = HOTSPOTS[name];
               const isSelected = selectedZoneName === name;
@@ -370,34 +642,29 @@ const ZoneActivation: React.FC = () => {
           <div className="flex items-center gap-3">
             {!systemState.isEmergencyActive && (
               <button
-                className="px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white disabled:bg-gray-400 disabled:cursor-not-allowed"
-                disabled={!(selectedZoneName && (isManualMode ? manualWindDirection : autoWindDirection))}
+                aria-label={`Activate emergency zone ${selectedZoneName || ''} with wind direction ${isManualMode ? manualWindDirection : autoWindDirection || ''}`}
+                className="px-4 py-2 rounded-md bg-red-600 hover:bg-red-700 text-white disabled:bg-gray-400 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
+                disabled={uiLock || !(selectedZoneName && (isManualMode ? manualWindDirection : autoWindDirection)) || activateZoneMutation.isPending}
                 onClick={async () => {
                   try {
                     const activeWindDirection = isManualMode ? manualWindDirection : autoWindDirection;
+                    if (!selectedZoneName || !activeWindDirection) return;
                     
                     console.log('Starting activation process...');
-                    
-                    // STATELESS: Only send command to backend, SystemStateContext will update state
-                    // Step 1: Send activation command to backend
-                    await apiClient.post('/emergency-events/activate', null, { 
-                      params: { zone_name: selectedZoneName, wind_direction: activeWindDirection }
+                    await activateZoneMutation.mutateAsync({ 
+                      zoneName: selectedZoneName, 
+                      windDirection: activeWindDirection 
                     });
                     
-                    console.log('Activation command sent to backend');
-                    
-                    // Step 2: Wait for backend to process and send commands to gateway
+                    // Wait for backend to process
                     await new Promise(resolve => setTimeout(resolve, 1500));
-                    
-                    // SystemStateContext will poll and update state automatically
                     console.log('Activation complete - SystemStateContext will update state');
                   } catch (err) {
                     console.error('Activation failed:', err);
-                    // Don't clear state - let SystemStateContext handle it via polling
                   }
                 }}
               >
-                Activate Emergency
+                {activateZoneMutation.isPending ? 'Activating...' : 'Activate Emergency'}
               </button>
             )}
             {systemState.isEmergencyActive && systemState.activeZone !== zoneActivation.zoneName && (
@@ -406,7 +673,9 @@ const ZoneActivation: React.FC = () => {
               </div>
             )}
             <button
-              className="px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 text-gray-100 border border-gray-600"
+              aria-label="Clear zone selection and deactivate emergency"
+              className="px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 text-gray-100 border border-gray-600 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-500"
+              disabled={uiLock || deactivateZoneMutation.isPending}
               onClick={async () => {
                 try {
                   console.log('Starting clear/deactivation process...');
@@ -417,19 +686,11 @@ const ZoneActivation: React.FC = () => {
                   setManualWindDirection('');
                   
                   // Step 2: Send deactivation command to backend (STATELESS - no local state changes)
-                  await apiClient.post('/zones/deactivate', {});
+                  await deactivateZoneMutation.mutateAsync();
                   console.log('Deactivation command sent');
                   
-                  // Step 3: Wait for backend to process and send commands to gateway
+                  // Step 3: Wait for backend to process
                   await new Promise(resolve => setTimeout(resolve, 2000));
-                  
-                  // Step 4: Refresh lamp states
-                  try {
-                    await apiClient.get('/lamps/');
-                    console.log('Lamp states refreshed');
-                  } catch (err) {
-                    console.error('Failed to refresh lamp states:', err);
-                  }
                   
                   // SystemStateContext will poll and update state automatically
                   console.log('Clear/deactivation complete - SystemStateContext will update state');
@@ -438,7 +699,7 @@ const ZoneActivation: React.FC = () => {
                 }
               }}
             >
-              Clear
+              {deactivateZoneMutation.isPending ? 'Clearing...' : 'Clear'}
             </button>
           </div>
         </div>

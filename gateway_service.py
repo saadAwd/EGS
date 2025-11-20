@@ -12,9 +12,24 @@ from models import Gateway as GatewayModel, Lamp, Pole
 import json
 
 # Configure logging - ensure messages go to stderr for Gunicorn to capture
+import os
+log_dir = os.getenv('TSIM_LOG_DIR', './logs')
+os.makedirs(log_dir, exist_ok=True)
+
+# Create dedicated file handler for gateway commands
+from logging.handlers import RotatingFileHandler
+gateway_file_handler = RotatingFileHandler(
+    os.path.join(log_dir, 'gateway_commands.log'),
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5
+)
+gateway_file_handler.setLevel(logging.INFO)
+gateway_file_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+gateway_file_handler.setFormatter(gateway_file_formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    handlers=[logging.StreamHandler(sys.stderr)],
+    handlers=[logging.StreamHandler(sys.stderr), gateway_file_handler],
     force=True,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
@@ -144,6 +159,8 @@ class ESP32GatewayService:
             sock.settimeout(self.ACK_TIMEOUT)  # Set ACK timeout
             log_always(f"GATEWAY: Connected to ESP32 at {self.esp32_ip}:{self.tcp_port}")
             logger.info(f"Connected to ESP32 gateway: {self.esp32_ip}:{self.tcp_port}")
+            # Also log to dedicated gateway commands log
+            logger.info(f"CONN_ESTABLISHED | {self.esp32_ip}:{self.tcp_port}")
             return sock
         except Exception as e:
             logger.error(f"Failed to create socket: {str(e)}")
@@ -333,6 +350,8 @@ class ESP32GatewayService:
                                 # This ensures no packet splitting over WiFi/LoRa
                                 self.socket.sendall(frame_bytes)
                                 logger.info(f"SENT FRAME: {frame_str} (attempt {attempt + 1}) - {len(frame_bytes)} bytes in single write")
+                                # Also log to dedicated gateway commands log with structured format
+                                logger.info(f"CMD_SEND | {frame_str} | attempt={attempt + 1} | bytes={len(frame_bytes)}")
                                 
                                 if not self.REQUIRE_ACK:
                                     # Fire-and-forget mode: consider send success
@@ -351,7 +370,10 @@ class ESP32GatewayService:
                                             if ack == b'K':
                                                 success = True
                                                 ack_received = True
+                                                wait_ms = int((time.time() - start_ack_time) * 1000)
                                                 logger.info(f"RECEIVED ACK: {frame_str} - Field device confirmed")
+                                                # Also log to dedicated gateway commands log with structured format
+                                                logger.info(f"ACK_RECV | {frame_str} | confirmed | wait_ms={wait_ms}")
                                                 break
                                             elif ack == b'':
                                                 logger.warning(f"EMPTY RESPONSE: {frame_str} - Field device disconnected")
@@ -368,10 +390,16 @@ class ESP32GatewayService:
                                     if ack_received:
                                         break
                                     else:
+                                        timeout_ms = int(self.ACK_TIMEOUT * 1000)
                                         logger.warning(f"ACK TIMEOUT: {frame_str} - Field device not responding")
+                                        # Also log to dedicated gateway commands log with structured format
+                                        logger.warning(f"ACK_TIMEOUT | {frame_str} | timeout_ms={timeout_ms}")
 
                     except Exception as e:
-                        logger.error(f"SEND ERROR: {frame_str} - {str(e)}")
+                        error_msg = str(e)
+                        logger.error(f"SEND ERROR: {frame_str} - {error_msg}")
+                        # Also log to dedicated gateway commands log with structured format
+                        logger.error(f"CMD_ERROR | {frame_str} | error={error_msg}")
                         success = False
                         
                         # Handle specific error types
