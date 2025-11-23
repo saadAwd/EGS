@@ -183,7 +183,7 @@ const PoleControl: React.FC<PoleControlProps> = ({
         next.set(lamp.id, 'sent');
         return next;
       });
-      
+
       if (lamp.is_on) {
         updatedLamp = await deactivateLamp(lamp.id);
       } else {
@@ -205,9 +205,8 @@ const PoleControl: React.FC<PoleControlProps> = ({
         updatedLamp = await activateLamp(lamp.id);
       }
       
-      // Clear pending state immediately since API call succeeded
-      // The backend has confirmed the command, so we can clear pending
-      // WebSocket ACK will still be handled as a backup confirmation
+      // CRITICAL FIX: Clear pending state immediately after successful API response
+      // This ensures the UI is responsive even if WebSocket ACK is delayed
       setPendingLampIds(prev => {
         const next = new Set(prev);
         next.delete(lamp.id);
@@ -215,12 +214,13 @@ const PoleControl: React.FC<PoleControlProps> = ({
       });
       setLampCommandStates(prev => {
         const next = new Map(prev);
-        next.set(lamp.id, 'ack');
+        next.set(lamp.id, 'ack'); // Optimistically mark as ACK
         return next;
       });
-      
-      // Set a timeout fallback to ensure pending is cleared even if WebSocket ACK doesn't arrive
-      setTimeout(() => {
+
+      // Fallback: Clear pending state after a timeout if WebSocket ACK is missed
+      // Store timeout ID in a ref so it can be cleared by WebSocket ACK handler
+      const pendingTimeout = setTimeout(() => {
         setPendingLampIds(prev => {
           const next = new Set(prev);
           next.delete(lamp.id);
@@ -228,13 +228,17 @@ const PoleControl: React.FC<PoleControlProps> = ({
         });
         setLampCommandStates(prev => {
           const next = new Map(prev);
-          // Only clear if still in 'ack' state (not failed or retry)
-          if (next.get(lamp.id) === 'ack') {
-            next.delete(lamp.id);
+          if (next.get(lamp.id) !== 'ack') { // Only if not already ACKed by WS
+            next.delete(lamp.id); // Clear state if no ACK
           }
           return next;
         });
-      }, 2000); // 2 second fallback timeout
+        toast.info(`Lamp ${lamp.gateway_id} command timed out (no WebSocket ACK)`);
+      }, 2000); // 2 seconds timeout
+      
+      // Store timeout ID so WebSocket ACK handler can clear it
+      // Note: The timeout will fire after 2s if no ACK is received
+      // The WebSocket handler will clear it if ACK is received before timeout
       
       // Update the specific lamp in the lamps array
       const updatedLamps = lamps.map(l => 

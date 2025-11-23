@@ -60,6 +60,13 @@ class ESP32GatewayService:
         # Server will wait for 'K' acknowledgment from field device before considering success
         self.REQUIRE_ACK = True
         
+        # TCP Heartbeat mechanism (TCP-only, NOT forwarded to LoRa)
+        # Backend sends '?' and gateway replies 'P' to keep connection alive
+        self.HEARTBEAT_INTERVAL = 30.0  # Send heartbeat every 30 seconds
+        self.HEARTBEAT_TIMEOUT = 3.0   # Wait 3 seconds for 'P' response
+        self.HEARTBEAT_Q = b'?'        # Heartbeat query
+        self.HEARTBEAT_A = b'P'        # Heartbeat answer
+        
         # Command queue and worker thread
         self.command_queue = queue.Queue()
         # Use re-entrant lock to avoid deadlocks when helper methods also lock
@@ -70,13 +77,10 @@ class ESP32GatewayService:
         log_always("GATEWAY: Command queue initialized")
         logger.info("Gateway worker thread started")
         
-        # TCP Heartbeat (ESP32 protocol: send '?' -> receive 'P')
-        # Heartbeat is TCP-only, NOT forwarded to LoRa by ESP32
-        self.HEARTBEAT_INTERVAL = 30.0  # Send heartbeat every 30 seconds
-        self.HEARTBEAT_TIMEOUT = 3.0  # Wait 3 seconds for 'P' response
+        # TCP Heartbeat thread (sends '?' every 30s, expects 'P' response)
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
-        logger.info("TCP heartbeat thread started (30s interval)")
+        logger.info("Gateway heartbeat thread started (30s interval)")
         
         # Zone assertion tracking (for critical zone activations only)
         # IMPORTANT: Only ONE zone can be active at a time
@@ -135,10 +139,8 @@ class ESP32GatewayService:
     def _drain_socket_buffer(self):
         """Drain any stale bytes from socket buffer before sending new command.
         
-        ESP32 protocol notes:
-        - 'P' responses are TCP heartbeat replies (ignore these)
-        - 'K' responses are LoRa ACKs (these are handled in command flow)
-        - CR/LF are ignored by ESP32 and won't be in buffer
+        Explicitly filters out 'P' heartbeat responses to prevent them from
+        interfering with command ACKs (as per Arduino code: heartbeat is TCP-only).
         """
         try:
             with self.socket_lock:
@@ -150,9 +152,9 @@ class ESP32GatewayService:
                             data = self.socket.recv(1024)
                             if not data:  # No more data available
                                 break
-                            # Filter out heartbeat responses ('P') - these are TCP-only
-                            if data == b'P':
-                                logger.debug("Drained heartbeat response 'P' (TCP-only, not LoRa)")
+                            # Filter out 'P' heartbeat responses (TCP-only, not forwarded to LoRa)
+                            if data == self.HEARTBEAT_A:
+                                logger.debug("Drained heartbeat response: 'P'")
                             else:
                                 logger.debug(f"Drained stale data: {data}")
                     except BlockingIOError:
@@ -166,6 +168,80 @@ class ESP32GatewayService:
                         self.socket.settimeout(self.ACK_TIMEOUT)
         except Exception as e:
             logger.warning(f"Failed to drain socket buffer: {e}")
+
+    def _heartbeat_loop(self):
+        """Background thread: periodically send TCP heartbeat ('?') and expect 'P' response.
+        
+        This keeps the TCP connection alive and verifies gateway responsiveness.
+        The heartbeat is TCP-only and NOT forwarded to LoRa (as per Arduino code).
+        """
+        logger.info("Heartbeat loop started")
+        
+        while True:
+            try:
+                time.sleep(self.HEARTBEAT_INTERVAL)  # Wait 30 seconds
+                
+                with self.socket_lock:
+                    if not self.socket:
+                        continue  # No connection, skip heartbeat
+                    
+                    try:
+                        # Send heartbeat query '?'
+                        self.socket.sendall(self.HEARTBEAT_Q)
+                        logger.debug("Heartbeat sent: '?'")
+                        
+                        # Wait for 'P' response (with timeout)
+                        self.socket.settimeout(self.HEARTBEAT_TIMEOUT)
+                        try:
+                            response = self.socket.recv(1)
+                            if response == self.HEARTBEAT_A:
+                                self.last_heartbeat = datetime.now()
+                                self.connection_status = "connected"
+                                logger.debug("Heartbeat received: 'P'")
+                            elif response == b'':
+                                # Empty response = connection closed
+                                logger.warning("Heartbeat: empty response (connection closed)")
+                                self.connection_status = "disconnected"
+                                try:
+                                    self.socket.close()
+                                except:
+                                    pass
+                                self.socket = None
+                            else:
+                                logger.warning(f"Heartbeat: unexpected response: {response}")
+                        except socket.timeout:
+                            logger.warning("Heartbeat: timeout (no 'P' response)")
+                            self.connection_status = "disconnected"
+                            try:
+                                self.socket.close()
+                            except:
+                                pass
+                            self.socket = None
+                        except Exception as e:
+                            logger.warning(f"Heartbeat: error receiving response: {e}")
+                            self.connection_status = "disconnected"
+                            try:
+                                self.socket.close()
+                            except:
+                                pass
+                            self.socket = None
+                        finally:
+                            # Restore ACK timeout
+                            self.socket.settimeout(self.ACK_TIMEOUT)
+                            
+                    except Exception as e:
+                        logger.warning(f"Heartbeat: error sending '?': {e}")
+                        self.connection_status = "disconnected"
+                        try:
+                            if self.socket:
+                                self.socket.close()
+                        except:
+                            pass
+                        self.socket = None
+                        
+            except Exception as e:
+                logger.error(f"Heartbeat loop error: {e}")
+                time.sleep(5.0)  # Wait longer on error
 
     def _create_socket(self):
         try:
@@ -187,14 +263,30 @@ class ESP32GatewayService:
     def ensure_connected(self) -> bool:
         """Ensure TCP socket is established without using the queue/worker.
         Returns True if socket is ready, False otherwise.
+        
+        Verifies socket is truly connected using getpeername() to detect
+        broken pipes or connection resets.
         """
         try:
             with self.socket_lock:
                 if self.socket is None:
                     self.socket = self._create_socket()
                 if self.socket:
-                    self.connection_status = "connected"
-                    return True
+                    # Verify socket is truly connected (detects broken pipes)
+                    try:
+                        self.socket.getpeername()
+                        self.connection_status = "connected"
+                        return True
+                    except (OSError, socket.error):
+                        # Socket is not actually connected, close it
+                        logger.warning("Socket exists but is not connected (broken pipe)")
+                        try:
+                            self.socket.close()
+                        except:
+                            pass
+                        self.socket = None
+                        self.connection_status = "disconnected"
+                        return False
                 else:
                     self.connection_status = "disconnected"
                     return False
@@ -378,8 +470,6 @@ class ESP32GatewayService:
                                     break
                                 else:
                                     # CRITICAL: Loop reading until we get 'K' or timeout
-                                    # ESP32 protocol: LoRa ACKs ('K') are echoed to TCP client
-                                    # Heartbeat responses ('P') are filtered out during drain
                                     # This prevents false successes from stale ACKs
                                     ack_received = False
                                     start_ack_time = time.time()
@@ -391,14 +481,14 @@ class ESP32GatewayService:
                                                 success = True
                                                 ack_received = True
                                                 wait_ms = int((time.time() - start_ack_time) * 1000)
-                                                logger.info(f"RECEIVED ACK: {frame_str} - Field device confirmed (LoRa ACK echoed by ESP32)")
+                                                logger.info(f"RECEIVED ACK: {frame_str} - Field device confirmed")
                                                 # Also log to dedicated gateway commands log with structured format
                                                 logger.info(f"ACK_RECV | {frame_str} | confirmed | wait_ms={wait_ms}")
                                                 break
-                                            elif ack == b'P':
-                                                # Heartbeat response - ignore (should have been drained, but handle gracefully)
-                                                logger.debug(f"Ignoring heartbeat 'P' during ACK wait for {frame_str}")
-                                                continue
+                                            elif ack == self.HEARTBEAT_A:
+                                                # Ignore 'P' heartbeat response (TCP-only, not forwarded to LoRa)
+                                                logger.debug(f"Ignoring heartbeat response 'P' during ACK wait for {frame_str}")
+                                                continue  # Continue waiting for 'K'
                                             elif ack == b'':
                                                 logger.warning(f"EMPTY RESPONSE: {frame_str} - Field device disconnected")
                                                 break
@@ -429,8 +519,10 @@ class ESP32GatewayService:
                         # Handle specific error types
                         if "Broken pipe" in str(e) or "Connection reset" in str(e):
                             logger.warning(f"Connection lost for {frame_str}, forcing reconnection")
+                            self.connection_status = "disconnected"
                         elif "Network is unreachable" in str(e):
                             logger.warning(f"Network unreachable for {frame_str}, check ESP32 WiFi connection")
+                            self.connection_status = "disconnected"
                         
                         try:
                             with self.socket_lock:
@@ -945,64 +1037,6 @@ class ESP32GatewayService:
                 
             except Exception as e:
                 logger.error(f"Zone assertion loop error: {e}")
-                time.sleep(5.0)  # Wait longer on error
-    
-    def _heartbeat_loop(self):
-        """Background thread: periodically send TCP heartbeat ('?') to ESP32.
-        
-        ESP32 protocol:
-        - Backend sends '?' (HEARTBEAT_Q)
-        - ESP32 replies 'P' (HEARTBEAT_A) - TCP-only, NOT forwarded to LoRa
-        - This keeps TCP connection alive and verifies gateway is responsive
-        """
-        log_always("GATEWAY: Heartbeat loop started")
-        logger.info("TCP heartbeat loop is running")
-        
-        while True:
-            try:
-                time.sleep(self.HEARTBEAT_INTERVAL)
-                
-                with self.socket_lock:
-                    if not self.socket:
-                        continue  # No connection, skip heartbeat
-                
-                # Send heartbeat '?' to ESP32
-                try:
-                    with self.socket_lock:
-                        if self.socket:
-                            # Drain any stale data first (filters out 'P' responses)
-                            self._drain_socket_buffer()
-                            
-                            # Send heartbeat '?' (ESP32 protocol)
-                            self.socket.sendall(b'?')
-                            logger.debug("Sent TCP heartbeat '?' to ESP32")
-                            
-                            # Wait for 'P' response (TCP-only, not from LoRa)
-                            self.socket.settimeout(self.HEARTBEAT_TIMEOUT)
-                            try:
-                                response = self.socket.recv(1)
-                                if response == b'P':
-                                    self.last_heartbeat = datetime.now()
-                                    self.connection_status = "connected"
-                                    logger.debug("Received TCP heartbeat response 'P' from ESP32")
-                                else:
-                                    logger.warning(f"Unexpected heartbeat response: {response}")
-                            except socket.timeout:
-                                logger.warning("TCP heartbeat timeout - no 'P' response from ESP32")
-                                # Connection might be dead, but don't close it yet
-                                # Let the command flow handle reconnection
-                            except Exception as e:
-                                logger.warning(f"Error receiving heartbeat response: {e}")
-                            
-                            # Restore ACK timeout
-                            self.socket.settimeout(self.ACK_TIMEOUT)
-                            
-                except Exception as e:
-                    logger.warning(f"Heartbeat error: {e}")
-                    # Don't close socket on heartbeat failure - let command flow handle it
-                    
-            except Exception as e:
-                logger.error(f"Heartbeat loop error: {e}")
                 time.sleep(5.0)  # Wait longer on error
     
     def close(self):

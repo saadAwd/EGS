@@ -164,11 +164,11 @@ const ZoneActivation: React.FC = () => {
   useEffect(() => {
     if (!zoneActivation.isActivated && !isManualMode && weather?.wind_direction_deg != null) {
       setAutoWindDirection(degToWindDir(weather.wind_direction_deg));
-    }
-    // Auto-switch to manual mode if weather connection fails
+        }
+        // Auto-switch to manual mode if weather connection fails
     if (weatherError && !zoneActivation.isActivated) {
-      setIsManualMode(true);
-    }
+          setIsManualMode(true);
+        }
   }, [weather, weatherError, zoneActivation.isActivated, isManualMode]);
 
   // Initialize wind direction from context if activated
@@ -479,13 +479,13 @@ const ZoneActivation: React.FC = () => {
         <div className="bg-gray-800 rounded-lg overflow-hidden border border-gray-700 flex-1" style={{ minHeight: 0, padding: '0.1rem' }}>
           <picture>
             <source srcSet={imageSrc} type="image/webp" />
-            <img
+          <img
               src={imageSrc.includes('.webp') ? imageSrc.replace('.webp', '.png') : imageSrc}
-              alt={zoneActivation.zoneName || systemState.activeZone || 'Active Zone'}
-              className="w-full h-full"
-              style={{ display: 'block', objectFit: 'fill', width: '100%', height: '100%' }}
-              loading="eager"
-            />
+            alt={zoneActivation.zoneName || systemState.activeZone || 'Active Zone'}
+            className="w-full h-full"
+            style={{ display: 'block', objectFit: 'fill', width: '100%', height: '100%' }}
+            loading="eager"
+          />
           </picture>
         </div>
       </div>
@@ -577,11 +577,11 @@ const ZoneActivation: React.FC = () => {
             {/* 16:9 container to keep overlays in correct positions */}
             <picture>
               <source srcSet={imageSrc} type="image/webp" />
-              <img
+            <img
                 src={imageSrc.includes('.webp') ? imageSrc.replace('.webp', '.png') : imageSrc}
-                alt={selectedZoneName || 'All Zones'}
-                className="absolute inset-0 h-full w-full object-contain"
-              />
+              alt={selectedZoneName || 'All Zones'}
+              className="absolute inset-0 h-full w-full object-contain"
+            />
             </picture>
             {KNOWN_ZONES.filter(name => HOTSPOTS[name]).map(name => {
               const r = HOTSPOTS[name];
